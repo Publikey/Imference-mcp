@@ -19,13 +19,24 @@
 
 import { createSigner, decodeXPaymentResponse, wrapFetchWithPayment } from "x402-fetch";
 import { privateKeyToAccount } from "viem/accounts";
+import { createPublicClient, erc20Abi, formatUnits, http } from "viem";
+import { base } from "viem/chains";
 import type { Hex } from "viem";
+
+/** USDC contract on Base mainnet. */
+const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
 
 export interface ImferenceConfig {
   baseUrl: string;
   apiKey?: string;
   /** EVM private key (0x-prefixed, 64 hex chars) holding USDC on Base for x402 payments. */
   walletPrivateKey?: string;
+  /** Hard cap in USD on any single x402 payment, whatever the tool call asks for. */
+  x402MaxUsdPerCall?: number;
+  /** Cumulative cap in USD on x402 spend over this server process's lifetime. */
+  x402SessionMaxUsd?: number;
+  /** Base mainnet RPC URL for balance reads (default https://mainnet.base.org). */
+  baseRpcUrl?: string;
 }
 
 export interface ImModel {
@@ -129,6 +140,15 @@ export function creditsToAtomicUsdc(credits: number): bigint {
   return BigInt(Math.ceil(credits)) * 1000n;
 }
 
+/** USD → atomic USDC units (6 decimals). */
+export function usdToAtomic(usd: number): bigint {
+  return BigInt(Math.round(usd * 1_000_000));
+}
+
+export function atomicToUsd(atomic: bigint): number {
+  return Number(atomic) / 1_000_000;
+}
+
 export class ImferenceError extends Error {
   constructor(
     message: string,
@@ -140,6 +160,9 @@ export class ImferenceError extends Error {
 }
 
 export class ImferenceClient {
+  /** Cumulative x402 spend this process, in atomic USDC units. */
+  private sessionSpentAtomic = 0n;
+
   constructor(private readonly config: ImferenceConfig) {
     if (config.walletPrivateKey && !/^0x[0-9a-fA-F]{64}$/.test(config.walletPrivateKey)) {
       throw new ImferenceError(
@@ -160,6 +183,41 @@ export class ImferenceClient {
   get walletAddress(): string | undefined {
     if (!this.config.walletPrivateKey) return undefined;
     return privateKeyToAccount(this.config.walletPrivateKey as Hex).address;
+  }
+
+  get sessionSpentUsd(): number {
+    return atomicToUsd(this.sessionSpentAtomic);
+  }
+
+  get spendingCaps(): { perCallUsd?: number; sessionMaxUsd?: number; sessionSpentUsd: number } {
+    return {
+      perCallUsd: this.config.x402MaxUsdPerCall,
+      sessionMaxUsd: this.config.x402SessionMaxUsd,
+      sessionSpentUsd: this.sessionSpentUsd,
+    };
+  }
+
+  /**
+   * Spending guard, enforced by this server regardless of what the tool call
+   * asks for. Runs BEFORE any signing or network call.
+   */
+  private authorizeSpend(priceAtomic: bigint, label: string): void {
+    const perCall = this.config.x402MaxUsdPerCall;
+    if (perCall !== undefined && priceAtomic > usdToAtomic(perCall)) {
+      throw new ImferenceError(
+        `Payment blocked: ${label} costs $${atomicToUsd(priceAtomic).toFixed(3)}, above the ` +
+          `per-call cap of $${perCall} (IMFERENCE_X402_MAX_USD). Raise the cap in the server ` +
+          `environment if this spend is intended.`,
+      );
+    }
+    const sessionMax = this.config.x402SessionMaxUsd;
+    if (sessionMax !== undefined && this.sessionSpentAtomic + priceAtomic > usdToAtomic(sessionMax)) {
+      throw new ImferenceError(
+        `Payment blocked: ${label} ($${atomicToUsd(priceAtomic).toFixed(3)}) would push session ` +
+          `spend past $${sessionMax} (IMFERENCE_X402_SESSION_MAX_USD; already spent ` +
+          `$${this.sessionSpentUsd.toFixed(3)}). Restart the server or raise the cap to continue.`,
+      );
+    }
   }
 
   /**
@@ -209,6 +267,23 @@ export class ImferenceClient {
     return u.toString();
   }
 
+  /**
+   * GET with 2 retries on network errors, 5xx and 529 (backoff 500ms/1500ms).
+   * Only used for idempotent reads — POSTs (which charge) are never retried.
+   */
+  private async getWithRetry(url: string, headers: Record<string, string>): Promise<Response> {
+    const delays = [500, 1500];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const res = await fetch(url, { headers });
+        if (res.status < 500 || attempt >= delays.length) return res;
+      } catch (err) {
+        if (attempt >= delays.length) throw err;
+      }
+      await new Promise((r) => setTimeout(r, delays[attempt]));
+    }
+  }
+
   private async parseError(res: Response): Promise<string> {
     try {
       const body = (await res.json()) as { error?: string };
@@ -219,14 +294,14 @@ export class ImferenceClient {
   }
 
   async listModels(): Promise<ImModel[]> {
-    const res = await fetch(this.url("/api/models"), { headers: this.headers(false) });
+    const res = await this.getWithRetry(this.url("/api/models"), this.headers(false));
     if (!res.ok) throw new ImferenceError(await this.parseError(res), res.status);
     const body = (await res.json()) as { models: ImModel[] };
     return body.models ?? [];
   }
 
   async listFormats(): Promise<ImFormat[]> {
-    const res = await fetch(this.url("/api/formats"), { headers: this.headers(false) });
+    const res = await this.getWithRetry(this.url("/api/formats"), this.headers(false));
     if (!res.ok) throw new ImferenceError(await this.parseError(res), res.status);
     const body = (await res.json()) as { formats: ImFormat[] };
     return body.formats ?? [];
@@ -248,9 +323,7 @@ export class ImferenceClient {
    * 404 → still pending (or unknown id), 422 → generation failed, 200 → done.
    */
   async status(requestId: string): Promise<StatusResult> {
-    const res = await fetch(this.url("/ondemand/status", { request_id: requestId }), {
-      headers: this.headers(false),
-    });
+    const res = await this.getWithRetry(this.url("/ondemand/status", { request_id: requestId }), this.headers(false));
     if (res.status === 404) return { state: "pending" };
     if (res.status === 422) return { state: "failed", error: await this.parseError(res) };
     if (!res.ok) throw new ImferenceError(await this.parseError(res), res.status);
@@ -259,7 +332,7 @@ export class ImferenceClient {
   }
 
   async balance(): Promise<number> {
-    const res = await fetch(this.url("/credits/balance"), { headers: this.headers(true) });
+    const res = await this.getWithRetry(this.url("/credits/balance"), this.headers(true));
     if (!res.ok) throw new ImferenceError(await this.parseError(res), res.status);
     const body = (await res.json()) as { credits: number };
     return body.credits;
@@ -267,21 +340,24 @@ export class ImferenceClient {
 
   /**
    * Pay-per-generation via x402: POST /ondemand/generate. The server prices
-   * the 402 challenge at the model's catalog cost; maxAtomicUsdc caps what
-   * the wallet will sign (pass the model's im_cost via creditsToAtomicUsdc,
-   * plus a small margin).
+   * the 402 challenge at the model's catalog cost — pass that cost so the
+   * spending guards run against it and the wallet signs for exactly that
+   * amount (+ $0.01 headroom for rounding).
    */
   async generateX402(
     payload: GeneratePayload,
-    maxAtomicUsdc: bigint,
+    priceCredits: number,
   ): Promise<{ request_id: string; kind: string; payment?: PaymentReceipt }> {
-    const payFetch = await this.paymentFetch(maxAtomicUsdc);
+    const priceAtomic = creditsToAtomicUsdc(priceCredits);
+    this.authorizeSpend(priceAtomic, `generation with model '${payload.model}'`);
+    const payFetch = await this.paymentFetch(priceAtomic + 10_000n);
     const res = await payFetch(this.url("/ondemand/generate"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
     if (!res.ok) throw new ImferenceError(await this.parseError(res), res.status);
+    this.sessionSpentAtomic += priceAtomic;
     const body = (await res.json()) as { request_id: string; kind: string };
     return { ...body, payment: this.receipt(res) };
   }
@@ -294,19 +370,60 @@ export class ImferenceClient {
     credits: number,
     apiKey?: string,
   ): Promise<{ api_key: string; credits_added: number; payment?: PaymentReceipt }> {
-    const payFetch = await this.paymentFetch(creditsToAtomicUsdc(credits) + 10_000n);
+    const priceAtomic = creditsToAtomicUsdc(credits);
+    this.authorizeSpend(priceAtomic, `credits top-up of ${credits} credits`);
+    const payFetch = await this.paymentFetch(priceAtomic + 10_000n);
     const res = await payFetch(this.url("/ondemand/credits/add"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ credits, ...(apiKey ? { api_key: apiKey } : {}) }),
     });
     if (!res.ok) throw new ImferenceError(await this.parseError(res), res.status);
+    this.sessionSpentAtomic += priceAtomic;
     const body = (await res.json()) as { api_key: string; credits_added: number };
     return { ...body, payment: this.receipt(res) };
   }
 
+  /**
+   * Download a generated media file. Restricted to http(s); returns the raw
+   * bytes plus the response content type.
+   */
+  async downloadMedia(url: string): Promise<{ bytes: Buffer; contentType: string }> {
+    const u = new URL(url);
+    if (u.protocol !== "https:" && u.protocol !== "http:") {
+      throw new ImferenceError(`Unsupported URL scheme '${u.protocol}' — expected http(s)`);
+    }
+    const res = await this.getWithRetry(url, {});
+    if (!res.ok) throw new ImferenceError(`Download failed: HTTP ${res.status}`, res.status);
+    return {
+      bytes: Buffer.from(await res.arrayBuffer()),
+      contentType: res.headers.get("content-type") ?? "application/octet-stream",
+    };
+  }
+
+  /** USDC balance of the configured wallet on Base mainnet (read-only RPC call). */
+  async usdcBalance(): Promise<{ address: string; usdc: number }> {
+    const address = this.walletAddress;
+    if (!address) {
+      throw new ImferenceError(
+        "IMFERENCE_WALLET_PRIVATE_KEY is not set — no wallet to read a balance for.",
+      );
+    }
+    const rpc = createPublicClient({
+      chain: base,
+      transport: http(this.config.baseRpcUrl ?? "https://mainnet.base.org"),
+    });
+    const raw = await rpc.readContract({
+      address: USDC_BASE,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [address as Hex],
+    });
+    return { address, usdc: Number(formatUnits(raw, 6)) };
+  }
+
   async allMedia(): Promise<MediaRow[]> {
-    const res = await fetch(this.url("/media/all"), { headers: this.headers(true) });
+    const res = await this.getWithRetry(this.url("/media/all"), this.headers(true));
     if (res.status === 204) return [];
     if (!res.ok) throw new ImferenceError(await this.parseError(res), res.status);
     const body = (await res.json()) as { data: MediaRow[] };

@@ -11,10 +11,17 @@ browse the model catalog, generate images and videos, and pay — with an API ke
 | `list_formats` | `GET /api/formats` | – |
 | `generate` | `POST /generate` or `POST /ondemand/generate` + polls `GET /ondemand/status` | API key or wallet |
 | `check_status` | `GET /ondemand/status` | – |
+| `download_media` | media blob URL | – |
 | `get_balance` | `GET /credits/balance` | API key |
 | `buy_credits_with_wallet` | `POST /ondemand/credits/add` | wallet |
+| `wallet_balance` | Base RPC (read-only) | wallet |
 | `payment_config` | – (local) | – |
 | `list_media` | `GET /media/all` | API key |
+
+Finished **images are embedded in the tool result** (base64, up to 3MB) so the agent
+can see what it generated and iterate on its prompt — disable per call with
+`include_image: false`. Videos are returned as URLs; `download_media` saves either
+to a local file.
 
 The media kind (image vs video) and the price come from the model catalog — see the
 full [API reference](https://imference.com/docs).
@@ -37,10 +44,22 @@ If the bot generates a lot, `buy_credits_with_wallet` is cheaper: one on-chain
 payment tops up an API key (or mints a new one) instead of paying a network fee
 per generation.
 
+### Spending guards
+
+Two caps are enforced by the server itself — whatever the LLM asks for, the guard
+runs **before** any signing or network call:
+
+- `IMFERENCE_X402_MAX_USD` — hard cap per payment (**default $10**). A
+  `buy_credits_with_wallet` above it fails with an explicit message; raise the env
+  var if the spend is intended.
+- `IMFERENCE_X402_SESSION_MAX_USD` — cumulative cap over the server process's
+  lifetime (default: off). `payment_config` reports what has been spent so far.
+
 > ⚠️ **Wallet security** — `IMFERENCE_WALLET_PRIVATE_KEY` gives this process signing
 > power over that wallet's USDC. Use a dedicated hot wallet funded with only what
-> the bot should be able to spend. The key never leaves the process and is never
-> exposed through any tool output (`payment_config` reports the public address only).
+> the bot should be able to spend, and keep the spending caps on. The key never
+> leaves the process and is never exposed through any tool output (`payment_config`
+> and `wallet_balance` report the public address only).
 
 ## Setup
 
@@ -57,6 +76,9 @@ Requires Node.js ≥ 18.
 |---|---|---|
 | `IMFERENCE_API_KEY` | credits rail | Bearer API key (top up at imference.com or via `buy_credits_with_wallet`) |
 | `IMFERENCE_WALLET_PRIVATE_KEY` | x402 rail | 0x-prefixed EVM private key holding USDC on Base mainnet |
+| `IMFERENCE_X402_MAX_USD` | – | Per-payment cap in USD (default `10`) |
+| `IMFERENCE_X402_SESSION_MAX_USD` | – | Cumulative x402 cap per process (default: off) |
+| `IMFERENCE_BASE_RPC_URL` | – | Base RPC for `wallet_balance` (default `https://mainnet.base.org`) |
 | `IMFERENCE_BASE_URL` | – | API base URL (default `https://imference.com`) |
 
 At least one of the two credentials is needed to generate. The catalog tools
@@ -101,7 +123,8 @@ claude mcp add imference -e IMFERENCE_API_KEY=your-api-key -- node /path/to/imfe
 ## Development
 
 ```bash
-npm run dev   # tsc --watch
+npm run dev    # tsc --watch
+npm test       # build + unit tests (mock HTTP server, no network / no real payments)
 ```
 
 Smoke test the stdio server by hand:

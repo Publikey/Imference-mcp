@@ -3,20 +3,26 @@
  * imference-mcp — MCP server (stdio) wrapping the Imference generation API.
  *
  * Environment:
- *   IMFERENCE_API_KEY             Bearer key for the credits rail
- *   IMFERENCE_WALLET_PRIVATE_KEY  EVM private key (USDC on Base) for the x402 rail
- *   IMFERENCE_BASE_URL            API base URL (default https://imference.com)
+ *   IMFERENCE_API_KEY              Bearer key for the credits rail
+ *   IMFERENCE_WALLET_PRIVATE_KEY   EVM private key (USDC on Base) for the x402 rail
+ *   IMFERENCE_X402_MAX_USD         hard cap per x402 payment (default 10; enforced
+ *                                  server-side, whatever the tool call asks for)
+ *   IMFERENCE_X402_SESSION_MAX_USD cumulative x402 cap for this process (default: off)
+ *   IMFERENCE_BASE_RPC_URL         Base mainnet RPC for wallet_balance (default mainnet.base.org)
+ *   IMFERENCE_BASE_URL             API base URL (default https://imference.com)
  *
  * At least one of API key / wallet is needed to generate; catalog tools and
  * status polling work without any credential.
  */
+
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
 import {
-  creditsToAtomicUsdc,
   ImferenceClient,
   ImferenceError,
   isVideoModel,
@@ -26,10 +32,24 @@ import {
   type MediaRow,
 } from "./client.js";
 
+function envNumber(name: string, fallback?: number): number | undefined {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) {
+    console.error(`Ignoring invalid ${name}='${raw}' (expected a non-negative number)`);
+    return fallback;
+  }
+  return n;
+}
+
 const client = new ImferenceClient({
   baseUrl: process.env.IMFERENCE_BASE_URL ?? "https://imference.com",
   apiKey: process.env.IMFERENCE_API_KEY,
   walletPrivateKey: process.env.IMFERENCE_WALLET_PRIVATE_KEY,
+  x402MaxUsdPerCall: envNumber("IMFERENCE_X402_MAX_USD", 10),
+  x402SessionMaxUsd: envNumber("IMFERENCE_X402_SESSION_MAX_USD"),
+  baseRpcUrl: process.env.IMFERENCE_BASE_RPC_URL,
 });
 
 const server = new McpServer({
@@ -37,13 +57,17 @@ const server = new McpServer({
   version: "0.1.0",
 });
 
+type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
 type ToolResult = {
-  content: { type: "text"; text: string }[];
+  content: ContentBlock[];
   isError?: boolean;
 };
 
-function ok(data: unknown): ToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+function ok(data: unknown, extra: ContentBlock[] = []): ToolResult {
+  return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }, ...extra] };
 }
 
 function fail(err: unknown): ToolResult {
@@ -68,6 +92,37 @@ function mediaSummary(m: MediaRow) {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Don't embed images past this size — keeps tool results within client limits. */
+const MAX_EMBED_BYTES = 3 * 1024 * 1024;
+
+const MIME_BY_FORMAT: Record<string, string> = {
+  webp: "image/webp",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+};
+
+/**
+ * Best-effort inline preview of a finished image so the agent can SEE the
+ * result and iterate on its prompt. Skips videos, oversized files, and any
+ * download hiccup — the URL in the JSON is always the source of truth.
+ */
+async function imagePreview(media: MediaRow): Promise<ContentBlock[]> {
+  if (media.Kind !== "image") return [];
+  try {
+    const { bytes, contentType } = await client.downloadMedia(media.URL);
+    if (bytes.length > MAX_EMBED_BYTES) return [];
+    const mime = contentType.startsWith("image/")
+      ? contentType.split(";")[0]
+      : MIME_BY_FORMAT[media.Format?.toLowerCase() ?? ""];
+    if (!mime) return [];
+    return [{ type: "image", data: bytes.toString("base64"), mimeType: mime }];
+  } catch {
+    return [];
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Catalog tools (no API key required)
@@ -205,6 +260,16 @@ server.registerTool(
       steps: z.number().int().positive().optional().describe("Diffusion steps (model default if omitted)"),
       guidance_scale: z.number().positive().optional().describe("CFG scale (model default if omitted)"),
       seed: z.number().int().optional().describe("Seed for reproducibility (random if omitted)"),
+      batch_nbr: z
+        .number()
+        .int()
+        .min(1)
+        .max(10)
+        .optional()
+        .describe(
+          "Number of images to generate in one request (default 1). Note: the status result " +
+            "carries the first image only — fetch the rest with list_media.",
+        ),
       scheduler: z.string().optional().describe("Sampler/scheduler (model default if omitted)"),
       img_url: z
         .string()
@@ -222,10 +287,17 @@ server.registerTool(
         .max(600)
         .optional()
         .describe("How long to wait for completion before returning the request_id (default 120, 0 = return immediately)"),
+      include_image: z
+        .boolean()
+        .optional()
+        .describe(
+          "Embed the finished image in the result so you can see it (default true; " +
+            "images ≤ 3MB only, never videos)",
+        ),
     },
   },
   async (args) => {
-    const { wait_seconds, rail: requestedRail, ...rest } = args;
+    const { wait_seconds, rail: requestedRail, include_image, ...rest } = args;
     const payload = rest as GeneratePayload;
     try {
       const rail = resolveRail(requestedRail);
@@ -234,9 +306,9 @@ server.registerTool(
       let kind: string;
       let payment: unknown;
       if (rail === "x402") {
-        // Resolve the model's catalog price so the wallet signs for exactly
-        // that amount (plus $0.01 headroom for rounding) — an unknown model
-        // fails here before any payment is attempted.
+        // Resolve the model's catalog price so the spending guards run
+        // against it and the wallet signs for exactly that amount — an
+        // unknown model fails here before any payment is attempted.
         const models = await client.listModels();
         const model = models.find((m) => m.model_code === payload.model);
         if (!model) {
@@ -246,8 +318,7 @@ server.registerTool(
             ),
           );
         }
-        const maxAtomic = creditsToAtomicUsdc(model.im_cost) + 10_000n;
-        const res = await client.generateX402(payload, maxAtomic);
+        const res = await client.generateX402(payload, model.im_cost);
         request_id = res.request_id;
         kind = res.kind;
         payment = res.payment;
@@ -269,7 +340,8 @@ server.registerTool(
           return fail(new ImferenceError(status.error));
         }
         if (status.state === "done") {
-          return ok({ status: "done", rail, payment, ...mediaSummary(status.media) });
+          const preview = include_image === false ? [] : await imagePreview(status.media);
+          return ok({ status: "done", rail, payment, ...mediaSummary(status.media) }, preview);
         }
       }
 
@@ -298,14 +370,64 @@ server.registerTool(
       "'pending' while still running, or the failure reason.",
     inputSchema: {
       request_id: z.string().describe("The request_id returned by generate"),
+      include_image: z
+        .boolean()
+        .optional()
+        .describe("Embed the finished image in the result (default true; images ≤ 3MB only)"),
     },
   },
-  async ({ request_id }) => {
+  async ({ request_id, include_image }) => {
     try {
       const status = await client.status(request_id);
-      if (status.state === "done") return ok({ status: "done", ...mediaSummary(status.media) });
+      if (status.state === "done") {
+        const preview = include_image === false ? [] : await imagePreview(status.media);
+        return ok({ status: "done", ...mediaSummary(status.media) }, preview);
+      }
       if (status.state === "failed") return fail(new ImferenceError(status.error));
       return ok({ status: "pending", request_id });
+    } catch (e) {
+      return fail(e);
+    }
+  },
+);
+
+server.registerTool(
+  "download_media",
+  {
+    title: "Download a generated media file",
+    description:
+      "Download a generated image or video to a local file. Pass either the media URL " +
+      "(from generate / check_status / list_media) or a request_id of a finished generation.",
+    inputSchema: {
+      url: z.string().url().optional().describe("Media URL to download"),
+      request_id: z
+        .string()
+        .optional()
+        .describe("Alternatively, the request_id of a finished generation"),
+      output_path: z
+        .string()
+        .describe("Destination file path (parent directories are created)"),
+    },
+  },
+  async ({ url, request_id, output_path }) => {
+    try {
+      let mediaUrl = url;
+      if (!mediaUrl) {
+        if (!request_id) {
+          return fail(new ImferenceError("Provide either url or request_id."));
+        }
+        const status = await client.status(request_id);
+        if (status.state === "pending") {
+          return fail(new ImferenceError(`Request ${request_id} is still pending — nothing to download yet.`));
+        }
+        if (status.state === "failed") return fail(new ImferenceError(status.error));
+        mediaUrl = status.media.URL;
+      }
+      const { bytes, contentType } = await client.downloadMedia(mediaUrl);
+      const path = resolve(output_path);
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, bytes);
+      return ok({ path, bytes: bytes.length, content_type: contentType, source_url: mediaUrl });
     } catch (e) {
       return fail(e);
     }
@@ -384,19 +506,49 @@ server.registerTool(
     title: "Show configured payment rails",
     description:
       "Show which payment rails this server can use: credits (IMFERENCE_API_KEY) and/or x402 " +
-      "(wallet paying USDC on Base). Returns the wallet's public address when configured — " +
-      "fund it with USDC on Base mainnet to enable x402 payments. Never exposes key material.",
+      "(wallet paying USDC on Base), plus the spending caps and what has been spent so far. " +
+      "Returns the wallet's public address when configured — fund it with USDC on Base mainnet " +
+      "to enable x402 payments. Never exposes key material.",
     inputSchema: {},
   },
   async () => {
+    const caps = client.spendingCaps;
     return ok({
       base_url: process.env.IMFERENCE_BASE_URL ?? "https://imference.com",
       credits_rail: client.hasApiKey ? "configured (IMFERENCE_API_KEY set)" : "not configured",
       x402_rail: client.hasWallet
-        ? { status: "configured", wallet_address: client.walletAddress, network: "base (mainnet)", currency: "USDC" }
+        ? {
+            status: "configured",
+            wallet_address: client.walletAddress,
+            network: "base (mainnet)",
+            currency: "USDC",
+            max_usd_per_payment: caps.perCallUsd ?? "unlimited",
+            session_max_usd: caps.sessionMaxUsd ?? "unlimited",
+            session_spent_usd: caps.sessionSpentUsd,
+          }
         : "not configured (set IMFERENCE_WALLET_PRIVATE_KEY)",
       default_rail: client.hasApiKey ? "credits" : client.hasWallet ? "x402" : "none",
     });
+  },
+);
+
+server.registerTool(
+  "wallet_balance",
+  {
+    title: "Get wallet USDC balance",
+    description:
+      "Read the configured wallet's USDC balance on Base mainnet (read-only RPC call). Use it " +
+      "to check the wallet can cover a generation or top-up before paying. x402 payments are " +
+      "gasless for the payer — only USDC is needed, no ETH.",
+    inputSchema: {},
+  },
+  async () => {
+    try {
+      const { address, usdc } = await client.usdcBalance();
+      return ok({ address, usdc_balance: usdc, network: "base (mainnet)" });
+    } catch (e) {
+      return fail(e);
+    }
   },
 );
 
