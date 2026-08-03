@@ -52,6 +52,9 @@ const client = new ImferenceClient({
   baseRpcUrl: process.env.IMFERENCE_BASE_RPC_URL,
 });
 
+/** Operator-chosen model used when a generate call doesn't name one. */
+const DEFAULT_MODEL = process.env.IMFERENCE_DEFAULT_MODEL;
+
 const server = new McpServer({
   name: "imference",
   version: "0.1.0",
@@ -252,7 +255,15 @@ server.registerTool(
           "Payment rail: 'credits' (API key balance) or 'x402' (per-request USDC payment " +
             "on Base). Default: credits if an API key is configured, else x402.",
         ),
-      model: z.string().describe("Model code from list_models"),
+      model: DEFAULT_MODEL
+        ? z
+            .string()
+            .optional()
+            .describe(
+              `Model code from list_models. Defaults to '${DEFAULT_MODEL}' (operator-configured) — ` +
+                "only pick a different model when the user asks for a specific style or for video.",
+            )
+        : z.string().describe("Model code from list_models"),
       prompt: z.string().describe("Text prompt describing the desired output"),
       negative_prompt: z.string().optional().describe("What to avoid (model default if omitted)"),
       width: z.number().int().positive().optional().describe("Output width in px (model's default format if omitted)"),
@@ -300,6 +311,15 @@ server.registerTool(
     const { wait_seconds, rail: requestedRail, include_image, ...rest } = args;
     const payload = rest as GeneratePayload;
     try {
+      payload.model = payload.model || DEFAULT_MODEL || "";
+      if (!payload.model) {
+        return fail(
+          new ImferenceError(
+            "No model specified and no IMFERENCE_DEFAULT_MODEL configured. " +
+              "Pick a model_code with list_models.",
+          ),
+        );
+      }
       const rail = resolveRail(requestedRail);
 
       let request_id: string;
@@ -528,6 +548,7 @@ server.registerTool(
           }
         : "not configured (set IMFERENCE_WALLET_PRIVATE_KEY)",
       default_rail: client.hasApiKey ? "credits" : client.hasWallet ? "x402" : "none",
+      default_model: DEFAULT_MODEL ?? "none (the agent picks from list_models)",
     });
   },
 );
