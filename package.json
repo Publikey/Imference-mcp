@@ -1,0 +1,36 @@
+{
+  "name": "imference-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for the Imference AI image & video generation API (imference.com)",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "imference-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc && node -e \"require('fs').chmodSync('dist/index.js', 0o755)\"",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "imference",
+    "image-generation",
+    "video-generation"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
