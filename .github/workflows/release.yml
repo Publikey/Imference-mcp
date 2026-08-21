@@ -12,8 +12,10 @@
 #   - the package is published with provenance: npm shows a verified link from the
 #     package back to this exact commit and workflow run.
 #
-# One-time setup: create an npm Granular Access Token (packages: read/write,
-# scoped to imference-mcp) and store it as the NPM_TOKEN repository secret.
+# Auth is npm Trusted Publishing (OIDC) — no token, no secret. Configured on
+# npmjs.com (package Settings → Trusted Publisher): repo Publikey/Imference-mcp,
+# workflow release.yml, environment "npm". Requires npm >= 11.5, hence the
+# npm upgrade step below.
 
 name: Release
 
@@ -55,10 +57,12 @@ jobs:
 
       - run: npm test
 
+      # The npm bundled with Node 22 (10.x) predates trusted publishing.
+      - name: Upgrade npm for OIDC trusted publishing
+        run: npm install -g npm@latest
+
       - name: Publish to npm
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create GitHub release
         env:
