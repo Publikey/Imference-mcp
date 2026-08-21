@@ -4,6 +4,15 @@
   "description": "MCP server for the Imference AI image & video generation API (imference.com)",
   "type": "module",
   "license": "MIT",
+  "author": "Publikey",
+  "homepage": "https://imference.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Publikey/Imference-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Publikey/Imference-mcp/issues"
+  },
   "bin": {
     "imference-mcp": "dist/index.js"
   },
@@ -15,6 +24,7 @@
   },
   "scripts": {
     "build": "tsc && node -e \"require('fs').chmodSync('dist/index.js', 0o755)\"",
+    "prepublishOnly": "npm test",
     "start": "node dist/index.js",
     "dev": "tsc --watch",
     "test": "npm run build && node --test test/*.test.mjs"
@@ -24,7 +34,11 @@
     "model-context-protocol",
     "imference",
     "image-generation",
-    "video-generation"
+    "video-generation",
+    "text-to-image",
+    "text-to-video",
+    "x402",
+    "claude"
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

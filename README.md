@@ -1,83 +1,113 @@
 # imference-mcp
 
-MCP (Model Context Protocol) server wrapping the [Imference](https://imference.com) AI
-image & video generation API. Lets any MCP client (Claude Desktop, Claude Code, etc.)
-browse the model catalog, generate images and videos, and pay — with an API key
-(**credits rail**) or directly from a wallet in USDC on Base (**x402 rail**).
+MCP server for [Imference](https://imference.com) — AI image & video generation
+for agents. 45+ image models and 3 video models behind four tools an LLM can
+drive end-to-end: browse the catalog, learn how to prompt each model, generate,
+and see the result.
 
-| Tool | Imference endpoint | Needs |
+Works with any MCP client: Claude Code, Claude Desktop, Cursor, etc.
+
+- **The agent sees what it generates** — finished images are embedded in the
+  tool result, so the model can judge the output and iterate on its prompt.
+- **Catalog-driven, always in sync** — model descriptions, parameter bounds and
+  prices come live from the API; the parameter list is the exact one the server
+  validates against.
+- **Per-model prompting knowledge** — `get_model` tells the agent whether a
+  model wants booru tags or natural language, the recommended quality prefix,
+  and the default negative prompt.
+- **Two payment rails** — a classic prepaid API key, or pay-per-generation in
+  USDC on Base ([x402](https://www.x402.org/)) straight from a wallet, with
+  hard spending caps enforced server-side.
+
+## Quickstart
+
+With Claude Code:
+
+```bash
+claude mcp add imference -e IMFERENCE_API_KEY=your-api-key -- npx -y imference-mcp
+```
+
+Or in a `mcpServers` config (Claude Desktop, etc.):
+
+```json
+{
+  "mcpServers": {
+    "imference": {
+      "command": "npx",
+      "args": ["-y", "imference-mcp"],
+      "env": { "IMFERENCE_API_KEY": "your-api-key" }
+    }
+  }
+}
+```
+
+Get an API key and credits at [imference.com](https://imference.com) — or skip
+the key entirely and pay per generation from a wallet (see
+[Payment rails](#payment-rails)). Generation costs start at 3 credits
+($0.003) per image.
+
+Then just ask your agent:
+
+> Generate a photorealistic banner image of a lighthouse in a storm.
+> Pick the best model for it and apply its prompting recommendations.
+
+The agent will list the models, read the chosen model's card, prepend its
+recommended quality tags, pick a banner format, generate, and show the result.
+
+## Tools
+
+| Tool | Purpose | Needs |
 |---|---|---|
-| `list_models` | `GET /api/models` | – |
-| `get_model` | `GET /api/models` + `/api/formats` | – |
-| `list_formats` | `GET /api/formats` | – |
-| `generate` | `POST /generate` or `POST /ondemand/generate` + polls `GET /ondemand/status` | API key or wallet |
-| `check_status` | `GET /ondemand/status` | – |
-| `download_media` | media blob URL | – |
-| `get_balance` | `GET /credits/balance` | API key |
-| `buy_credits_with_wallet` | `POST /ondemand/credits/add` | wallet |
-| `wallet_balance` | Base RPC (read-only) | wallet |
-| `payment_config` | – (local) | – |
-| `list_media` | `GET /media/all` | API key |
+| `list_models` | Model overview for picking: kind, style family, prompt style, cost, capabilities | – |
+| `get_model` | One model in full: description, prompting recommendations, exact parameters & bounds, formats & price multipliers | – |
+| `list_formats` | Predefined output formats per model (`square`, `portrait`, `landscape-wide`, …) | – |
+| `generate` | Submit a generation and wait; embeds the finished image in the result | API key or wallet |
+| `check_status` | Poll a still-running generation | – |
+| `download_media` | Save an image or video to a local file | – |
+| `get_balance` | Remaining credits of the API key | API key |
+| `list_media` | Previously generated media, newest first | API key |
+| `buy_credits_with_wallet` | Top up (or mint) an API key with one USDC payment | wallet |
+| `wallet_balance` | USDC balance of the configured wallet (read-only) | wallet |
+| `payment_config` | Which rails are configured, caps, session spend | – |
 
-Finished **images are embedded in the tool result** (base64, up to 3MB) so the agent
-can see what it generated and iterate on its prompt — disable per call with
-`include_image: false`. Videos are returned as URLs; `download_media` saves either
-to a local file.
-
-The media kind (image vs video) and the price come from the model catalog — see the
-full [API reference](https://imference.com/docs).
-
-Output size and aspect ratio are selected with `format_code` — a predefined format
-from `list_formats` (`square`, `portrait`, `landscape-wide`, …) that the API
-translates into dimensions for the workers and that carries the price multiplier.
-Raw `width`/`height` or `aspect_ratio` are deliberately not exposed: most models
-ignore or refuse them.
+Output size and aspect ratio are selected with `format_code` — a predefined
+format the API translates into dimensions and that carries the price
+multiplier. Raw width/height are deliberately not exposed.
 
 ## Payment rails
 
-- **credits** — classic Bearer API key; each generation debits the model's catalog
-  cost from your balance. Configured with `IMFERENCE_API_KEY`.
-- **x402** — pay-per-request in USDC on Base mainnet. The server answers with an
-  HTTP 402 challenge priced at the model's catalog cost; this MCP server signs an
-  EIP-3009 `transferWithAuthorization` with the configured wallet key
-  ([x402-fetch](https://www.npmjs.com/package/x402-fetch)) and retries with the
-  `X-PAYMENT` header. Configured with `IMFERENCE_WALLET_PRIVATE_KEY`.
+- **credits** — Bearer API key; each generation debits the model's catalog
+  cost from your balance. Set `IMFERENCE_API_KEY`.
+- **x402** — pay-per-request in USDC on Base mainnet, no account needed. The
+  server answers with an HTTP 402 challenge priced at the request's catalog
+  cost; this MCP server signs an EIP-3009 `transferWithAuthorization` with the
+  configured wallet ([x402-fetch](https://www.npmjs.com/package/x402-fetch))
+  and retries with the `X-PAYMENT` header. Gasless for the payer — only USDC
+  needed, no ETH. Set `IMFERENCE_WALLET_PRIVATE_KEY`.
 
-`generate` picks the rail automatically (credits if an API key is set, else x402) —
-override per call with the `rail` argument. The wallet only ever signs up to the
-request's catalog price (+ $0.01 headroom) — `im_cost` scaled by the chosen format's
-`credit_multiplier`, the clip duration, and `batch_nbr`, the same formula the API
-prices the 402 challenge with — so a typo'd model can never overcharge.
+`generate` picks the rail automatically (credits if an API key is set, else
+x402) — override per call with the `rail` argument. The wallet only ever signs
+up to the request's catalog price (+ $0.01 headroom) — base cost scaled by the
+chosen format, clip duration and batch size, the same formula the API prices
+the challenge with — so a typo'd request can never overcharge.
 
-If the bot generates a lot, `buy_credits_with_wallet` is cheaper: one on-chain
-payment tops up an API key (or mints a new one) instead of paying a network fee
-per generation.
+Generating a lot? `buy_credits_with_wallet` is cheaper: one on-chain payment
+tops up an API key (or mints a new one) instead of paying per generation.
 
 ### Spending guards
 
-Two caps are enforced by the server itself — whatever the LLM asks for, the guard
-runs **before** any signing or network call:
+Two caps are enforced by this server itself — whatever the LLM asks for, the
+guard runs **before** any signing or network call:
 
-- `IMFERENCE_X402_MAX_USD` — hard cap per payment (**default $10**). A
-  `buy_credits_with_wallet` above it fails with an explicit message; raise the env
-  var if the spend is intended.
+- `IMFERENCE_X402_MAX_USD` — hard cap per payment (**default $10**).
 - `IMFERENCE_X402_SESSION_MAX_USD` — cumulative cap over the server process's
-  lifetime (default: off). `payment_config` reports what has been spent so far.
+  lifetime (default: off). `payment_config` reports what has been spent.
 
-> ⚠️ **Wallet security** — `IMFERENCE_WALLET_PRIVATE_KEY` gives this process signing
-> power over that wallet's USDC. Use a dedicated hot wallet funded with only what
-> the bot should be able to spend, and keep the spending caps on. The key never
-> leaves the process and is never exposed through any tool output (`payment_config`
-> and `wallet_balance` report the public address only).
-
-## Setup
-
-```bash
-npm install
-npm run build
-```
-
-Requires Node.js ≥ 18.
+> ⚠️ **Wallet security** — `IMFERENCE_WALLET_PRIVATE_KEY` gives this process
+> signing power over that wallet's USDC. Use a dedicated hot wallet funded with
+> only what the bot should be able to spend, and keep the spending caps on. The
+> key never leaves the process and is never exposed through any tool output
+> (`payment_config` and `wallet_balance` report the public address only).
 
 ## Configuration
 
@@ -85,56 +115,42 @@ Requires Node.js ≥ 18.
 |---|---|---|
 | `IMFERENCE_API_KEY` | credits rail | Bearer API key (top up at imference.com or via `buy_credits_with_wallet`) |
 | `IMFERENCE_WALLET_PRIVATE_KEY` | x402 rail | 0x-prefixed EVM private key holding USDC on Base mainnet |
-| `IMFERENCE_DEFAULT_MODEL` | – | Model used when `generate` is called without one — makes the bot's model choice deterministic instead of leaving it to the LLM |
+| `IMFERENCE_DEFAULT_MODEL` | – | Model used when `generate` is called without one — makes the bot's model choice deterministic |
 | `IMFERENCE_X402_MAX_USD` | – | Per-payment cap in USD (default `10`) |
 | `IMFERENCE_X402_SESSION_MAX_USD` | – | Cumulative x402 cap per process (default: off) |
 | `IMFERENCE_BASE_RPC_URL` | – | Base RPC for `wallet_balance` (default `https://mainnet.base.org`) |
 | `IMFERENCE_BASE_URL` | – | API base URL (default `https://imference.com`) |
 
 At least one of the two credentials is needed to generate. The catalog tools
-(`list_models`, `list_formats`) and `check_status` work without any credential.
-
-## Usage with Claude Desktop / Claude Code
-
-```json
-{
-  "mcpServers": {
-    "imference": {
-      "command": "node",
-      "args": ["/path/to/imference-mcp/dist/index.js"],
-      "env": {
-        "IMFERENCE_API_KEY": "your-api-key",
-        "IMFERENCE_WALLET_PRIVATE_KEY": "0x… (optional, enables the x402 rail)"
-      }
-    }
-  }
-}
-```
-
-With Claude Code:
-
-```bash
-claude mcp add imference -e IMFERENCE_API_KEY=your-api-key -- node /path/to/imference-mcp/dist/index.js
-```
+and `check_status` work without any credential.
 
 ## How `generate` works
 
 1. Resolves the payment rail (explicit `rail` arg > API key > wallet).
-   - credits: `POST /generate` — the model's cost is deducted from your balance.
-   - x402: looks up the model's cost in the catalog, then `POST /ondemand/generate`;
-     the 402 challenge is signed with the wallet and settled in USDC on Base. The
-     settlement receipt (tx hash, payer) is included in the result.
-2. Polls `GET /ondemand/status` (the shared, unauthenticated status handler) with
-   exponential backoff (2s → 10s) for up to `wait_seconds` (default 120). The API
-   maps state to HTTP codes: `404` pending, `422` failed, `200` done.
-3. Returns the blob URL of the media when done. If still running (videos can take a
-   while), returns the `request_id` — poll it with `check_status`.
+2. Submits the request — credits: `POST /generate`; x402: prices the request
+   from the catalog, then `POST /ondemand/generate` with the signed payment.
+3. Polls the status endpoint with exponential backoff for up to `wait_seconds`
+   (default 120). Images are usually ready in well under a minute; videos can
+   take longer — if still running, the tool returns a `request_id` to poll
+   with `check_status`.
+4. Returns the media URL, and embeds the image (≤ 3 MB) in the result so the
+   agent can see it. `download_media` saves it locally — generated URLs live
+   on ephemeral storage, so download what you want to keep.
+
+Full API reference: [imference.com/docs](https://imference.com/docs).
 
 ## Development
 
 ```bash
-npm run dev    # tsc --watch
-npm test       # build + unit tests (mock HTTP server, no network / no real payments)
+npm install
+npm run build
+npm test        # unit tests — mock HTTP server, no network, no real payments
+```
+
+Requires Node.js ≥ 18. Run the server locally instead of via npx:
+
+```bash
+claude mcp add imference -e IMFERENCE_API_KEY=your-api-key -- node /path/to/imference-mcp/dist/index.js
 ```
 
 Smoke test the stdio server by hand:
@@ -147,9 +163,14 @@ printf '%s\n' \
   | node dist/index.js
 ```
 
-## Repo layout
+Repo layout:
 
 ```
 src/index.ts    MCP server: tool registration + stdio transport
-src/client.ts   HTTP client for the Imference API
+src/client.ts   HTTP client for the Imference API (catalog, pricing, x402)
+test/           unit tests against a local mock server
 ```
+
+## License
+
+[MIT](LICENSE)
