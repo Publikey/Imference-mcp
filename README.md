@@ -41,6 +41,12 @@ Or in a `mcpServers` config (Claude Desktop, etc.):
 }
 ```
 
+> **Note** — the first `npx` launch downloads the package; if your MCP client
+> times out during that cold start and the server never comes up afterwards,
+> the npx cache was likely left half-written: clear it
+> (`rm -rf "$(npm config get cache)/_npx"`) and retry, or install permanently
+> with `npm i -g imference-mcp` and use `imference-mcp` as the command.
+
 Get an API key and credits at [imference.com](https://imference.com) — or skip
 the key entirely and pay per generation from a wallet (see
 [Payment rails](#payment-rails)). Generation costs start at 3 credits
