@@ -163,6 +163,19 @@ printf '%s\n' \
   | node dist/index.js
 ```
 
+### Releasing
+
+Releases are tag-driven and published by CI (`.github/workflows/release.yml`) —
+never run `npm publish` by hand:
+
+```bash
+npm version patch   # or minor / major — bumps package.json, commits, tags vX.Y.Z
+git push --follow-tags
+```
+
+The workflow refuses a tag that doesn't match `package.json`, runs the tests,
+publishes to npm with provenance, and creates the GitHub release.
+
 Repo layout:
 
 ```
