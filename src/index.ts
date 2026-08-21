@@ -23,11 +23,13 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 import {
+  computeCreditCost,
   ImferenceClient,
   ImferenceError,
   isVideoModel,
   MAX_X402_CREDITS_TOPUP,
   MIN_X402_CREDITS_TOPUP,
+  resolveFormat,
   type GeneratePayload,
   type MediaRow,
 } from "./client.js";
@@ -160,6 +162,10 @@ server.registerTool(
           steps: { default: m.steps_default, min: m.steps_min, max: m.steps_max },
           guidance_scale: { default: m.cfg_default, min: m.cfg_min, max: m.cfg_max },
           scheduler_default: m.scheduler_default || undefined,
+          duration_s:
+            m.duration_s_default != null
+              ? { default: m.duration_s_default, min: m.duration_s_min, max: m.duration_s_max }
+              : undefined,
           frames:
             m.frames_default != null
               ? { default: m.frames_default, min: m.frames_min, max: m.frames_max }
@@ -182,8 +188,9 @@ server.registerTool(
   {
     title: "List model formats",
     description:
-      "List the supported output formats (width/height/aspect ratio) per model. Useful to pick " +
-      "valid dimensions instead of guessing; each model has a default format.",
+      "List the predefined output formats per model: format_code (e.g. 'square', 'portrait', " +
+      "'landscape-wide'), its resolution/ratio, and its price multiplier (credit_multiplier — HD " +
+      "tiers bill more). Pass a format_code to generate to pick a size; each model has a default.",
     inputSchema: {
       model: z.string().optional().describe("Filter formats for a single model_code"),
     },
@@ -242,7 +249,9 @@ server.registerTool(
     title: "Generate an image or video",
     description:
       "Submit a generation request to Imference and wait for the result. The media kind (image " +
-      "or video) is determined by the model — use list_models to pick a model_code. Payment: " +
+      "or video) is determined by the model — use list_models to pick a model_code. Size and " +
+      "aspect ratio are chosen with format_code (a predefined format from list_formats), never " +
+      "with raw dimensions. Payment: " +
       "either the credits rail (API key balance) or the x402 rail (pay-per-generation in USDC " +
       "on Base, signed with the configured wallet); defaults to credits when an API key is set, " +
       "else x402 when a wallet is set. Returns the media URL when done; if the generation is " +
@@ -266,8 +275,15 @@ server.registerTool(
         : z.string().describe("Model code from list_models"),
       prompt: z.string().describe("Text prompt describing the desired output"),
       negative_prompt: z.string().optional().describe("What to avoid (model default if omitted)"),
-      width: z.number().int().positive().optional().describe("Output width in px (model's default format if omitted)"),
-      height: z.number().int().positive().optional().describe("Output height in px"),
+      format_code: z
+        .string()
+        .optional()
+        .describe(
+          "Output size/ratio as a predefined format code from list_formats, e.g. 'square', " +
+            "'portrait', 'landscape-wide' (model's default format if omitted). This is the ONLY " +
+            "way to pick a size or aspect ratio — raw dimensions are not accepted. Some formats " +
+            "(HD tiers) multiply the price; list_formats shows each one's credit_multiplier.",
+        ),
       steps: z.number().int().positive().optional().describe("Diffusion steps (model default if omitted)"),
       guidance_scale: z.number().positive().optional().describe("CFG scale (model default if omitted)"),
       seed: z.number().int().optional().describe("Seed for reproducibility (random if omitted)"),
@@ -275,11 +291,12 @@ server.registerTool(
         .number()
         .int()
         .min(1)
-        .max(10)
+        .max(4)
         .optional()
         .describe(
-          "Number of images to generate in one request (default 1). Note: the status result " +
-            "carries the first image only — fetch the rest with list_media.",
+          "Number of images to generate in one request (default 1, max 4). Each image is " +
+            "billed. Note: the status result carries the first image only — fetch the rest " +
+            "with list_media.",
         ),
       scheduler: z.string().optional().describe("Sampler/scheduler (model default if omitted)"),
       img_url: z
@@ -289,8 +306,15 @@ server.registerTool(
         .describe("Source image URL — for img2img on image models, or image-to-video on video models"),
       num_frames: z.number().int().positive().optional().describe("Video only: number of frames"),
       fps: z.number().int().positive().optional().describe("Video only: frames per second"),
-      duration_seconds: z.number().int().positive().optional().describe("Video only: duration in seconds (models that support it)"),
-      aspect_ratio: z.string().optional().describe('Aspect ratio, e.g. "16:9" (models that support it)'),
+      duration_s: z
+        .number()
+        .positive()
+        .optional()
+        .describe(
+          "Video only: clip length in seconds, for models whose duration_s in list_models says " +
+            "the knob exists. Billed proportionally to the model's default duration (a 10s clip " +
+            "on a 5s-default model costs ×2).",
+        ),
       wait_seconds: z
         .number()
         .int()
@@ -326,10 +350,12 @@ server.registerTool(
       let kind: string;
       let payment: unknown;
       if (rail === "x402") {
-        // Resolve the model's catalog price so the spending guards run
-        // against it and the wallet signs for exactly that amount — an
-        // unknown model fails here before any payment is attempted.
-        const models = await client.listModels();
+        // Resolve the catalog price of THIS request — im_cost scaled by the
+        // chosen format, clip duration and batch size, the same formula the
+        // API prices the 402 challenge with — so the spending guards run
+        // against the real amount and the wallet signs for exactly that.
+        // An unknown model or format fails here, before any payment.
+        const [models, allFormats] = await Promise.all([client.listModels(), client.listFormats()]);
         const model = models.find((m) => m.model_code === payload.model);
         if (!model) {
           return fail(
@@ -338,7 +364,17 @@ server.registerTool(
             ),
           );
         }
-        const res = await client.generateX402(payload, model.im_cost);
+        const formats = allFormats.filter((f) => f.model_code === payload.model);
+        const format = resolveFormat(formats, payload.format_code);
+        if (payload.format_code && format?.format_code.toLowerCase() !== payload.format_code.trim().toLowerCase()) {
+          return fail(
+            new ImferenceError(
+              `Unknown format_code '${payload.format_code}' for ${payload.model}. ` +
+                "Use list_formats to see its valid format codes.",
+            ),
+          );
+        }
+        const res = await client.generateX402(payload, computeCreditCost(model, format, payload));
         request_id = res.request_id;
         kind = res.kind;
         payment = res.payment;

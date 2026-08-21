@@ -26,6 +26,12 @@ to a local file.
 The media kind (image vs video) and the price come from the model catalog — see the
 full [API reference](https://imference.com/docs).
 
+Output size and aspect ratio are selected with `format_code` — a predefined format
+from `list_formats` (`square`, `portrait`, `landscape-wide`, …) that the API
+translates into dimensions for the workers and that carries the price multiplier.
+Raw `width`/`height` or `aspect_ratio` are deliberately not exposed: most models
+ignore or refuse them.
+
 ## Payment rails
 
 - **credits** — classic Bearer API key; each generation debits the model's catalog
@@ -38,7 +44,9 @@ full [API reference](https://imference.com/docs).
 
 `generate` picks the rail automatically (credits if an API key is set, else x402) —
 override per call with the `rail` argument. The wallet only ever signs up to the
-model's catalog price (+ $0.01 headroom), so a typo'd model can never overcharge.
+request's catalog price (+ $0.01 headroom) — `im_cost` scaled by the chosen format's
+`credit_multiplier`, the clip duration, and `batch_nbr`, the same formula the API
+prices the 402 challenge with — so a typo'd model can never overcharge.
 
 If the bot generates a lot, `buy_credits_with_wallet` is cheaper: one on-chain
 payment tops up an API key (or mints a new one) instead of paying a network fee

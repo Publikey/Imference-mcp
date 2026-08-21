@@ -8,7 +8,9 @@ import { createServer } from "node:http";
 import {
   ImferenceClient,
   ImferenceError,
+  computeCreditCost,
   creditsToAtomicUsdc,
+  resolveFormat,
   usdToAtomic,
   isVideoModel,
 } from "../dist/client.js";
@@ -176,6 +178,37 @@ test("session cap accumulates across payments", async () => {
     () => client.generateX402({ model: "flux", prompt: "y" }, 50),
     (e) => e instanceof ImferenceError && /session/.test(e.message),
   );
+});
+
+// ---------------------------------------------------------------------------
+// Pricing — must mirror the API's creditCost (pricing.go), which prices the
+// 402 challenge: a mismatch means the wallet signs for less than the challenge
+// and every x402 generation fails.
+// ---------------------------------------------------------------------------
+
+test("computeCreditCost applies format, duration and batch multipliers, ceiled once", () => {
+  const video = { im_cost: 10, duration_s_default: 5, duration_s_min: 1, duration_s_max: 15 };
+  const hd = { model_code: "m", format_code: "hd", credit_multiplier: 2, is_default: false };
+
+  assert.equal(computeCreditCost(video, undefined, {}), 10); // bare catalog price
+  assert.equal(computeCreditCost(video, hd, {}), 20); // HD bills ×2
+  assert.equal(computeCreditCost(video, hd, { duration_s: 10 }), 40); // 10s on 5s default ×2
+  assert.equal(computeCreditCost(video, undefined, { duration_s: 60 }), 30); // clamped to max 15s → ×3
+  assert.equal(computeCreditCost(video, undefined, { batch_nbr: 3 }), 30); // every image billed
+  assert.equal(computeCreditCost({ im_cost: 3 }, undefined, { duration_s: 8 }), 3); // no duration knob → untouched
+  assert.equal(computeCreditCost({ im_cost: 0 }, hd, { batch_nbr: 4 }), 0); // free stays free
+  assert.equal(computeCreditCost({ im_cost: 1 }, { credit_multiplier: 0.1 }, {}), 1); // floor of 1
+});
+
+test("resolveFormat picks the named format, else the model's default", () => {
+  const formats = [
+    { model_code: "m", format_code: "square", is_default: true },
+    { model_code: "m", format_code: "landscape-wide", is_default: false, credit_multiplier: 2 },
+  ];
+  assert.equal(resolveFormat(formats, "Landscape-Wide").format_code, "landscape-wide");
+  assert.equal(resolveFormat(formats, undefined).format_code, "square");
+  assert.equal(resolveFormat(formats, "nope").format_code, "square"); // unknown → default (the MCP refuses it upstream)
+  assert.equal(resolveFormat([], "square"), undefined);
 });
 
 test("top-up bounds convert to the right atomic amounts", () => {

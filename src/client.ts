@@ -69,6 +69,9 @@ export interface ImModel {
   fps_min?: number;
   fps_max?: number;
   im_cost: number;
+  duration_s_default?: number | null;
+  duration_s_min?: number | null;
+  duration_s_max?: number | null;
   [key: string]: unknown;
 }
 
@@ -82,6 +85,8 @@ export interface ImFormat {
   description?: string;
   order: number;
   is_default: boolean;
+  /** Price multiplier of this format (1 when absent; HD tiers typically bill ×2). */
+  credit_multiplier?: number | null;
 }
 
 /** /status and /media/all rows marshal Go struct fields verbatim (untagged). */
@@ -94,12 +99,20 @@ export interface MediaRow {
   Timestamp: string;
 }
 
+/**
+ * Wire payload for POST /generate and /ondemand/generate.
+ *
+ * Output size is selected with format_code (a predefined format from
+ * /api/formats, e.g. "landscape-wide") — never raw width/height: the API
+ * translates the format into dimensions for the GPU workers, and the format
+ * carries the price multiplier. Free-form knobs like aspect_ratio only exist
+ * on externally-hosted models and are refused everywhere else, so this client
+ * doesn't offer them.
+ */
 export interface GeneratePayload {
   model: string;
   prompt: string;
   negative_prompt?: string;
-  width?: number;
-  height?: number;
   steps?: number;
   clip_skip?: number;
   guidance_scale?: number;
@@ -109,13 +122,8 @@ export interface GeneratePayload {
   fps?: number;
   img_url?: string;
   scheduler?: string;
-  output_format?: string;
-  output_compression?: number;
-  aspect_ratio?: string;
-  image_size?: string;
-  resolution?: string;
-  duration_seconds?: number;
-  person_generation?: string;
+  format_code?: string;
+  duration_s?: number;
 }
 
 export type StatusResult =
@@ -434,4 +442,54 @@ export class ImferenceClient {
 /** A model produces video when its engine/queue is wan-video based (same rule as the API). */
 export function isVideoModel(m: ImModel): boolean {
   return m.im_engine === "wan22" || (m.queue ?? "").startsWith("wan-video");
+}
+
+/**
+ * What the API will charge for this request, in credits — mirrors the API's
+ * creditCost (pricing.go), which prices BOTH rails:
+ *
+ *   cost = max(1, ceil(im_cost × format multiplier × duration multiplier × batch_nbr))
+ *
+ * with free (im_cost = 0) models staying free. The x402 402 challenge is priced
+ * with this exact formula, so the wallet must sign for this amount — signing for
+ * the bare im_cost fails as soon as a format bills ×2 or batch_nbr > 1.
+ */
+export function computeCreditCost(
+  m: ImModel,
+  format: ImFormat | undefined,
+  p: Pick<GeneratePayload, "batch_nbr" | "duration_s">,
+): number {
+  if (m.im_cost <= 0) return 0;
+  const fmtMult =
+    format?.credit_multiplier && format.credit_multiplier > 0 ? format.credit_multiplier : 1;
+  const batchMult = p.batch_nbr && p.batch_nbr > 1 ? p.batch_nbr : 1;
+  const cost = m.im_cost * fmtMult * durationMultiplier(m, p.duration_s) * batchMult;
+  return Math.max(1, Math.ceil(cost));
+}
+
+/** Requested clip length (clamped to the model's bounds) over the default length; 1 without duration control. */
+function durationMultiplier(m: ImModel, durationS: number | undefined): number {
+  const def = m.duration_s_default;
+  if (def == null || def <= 0) return 1;
+  let d = durationS ?? 0;
+  if (d <= 0) return 1;
+  if (m.duration_s_min != null && d < m.duration_s_min) d = m.duration_s_min;
+  if (m.duration_s_max != null && d > m.duration_s_max) d = m.duration_s_max;
+  return d / def;
+}
+
+/**
+ * The format a request selects: its format_code when it names one, else the
+ * model's default format. Same resolution the API prices with (resolveFormat).
+ */
+export function resolveFormat(
+  formats: ImFormat[],
+  formatCode: string | undefined,
+): ImFormat | undefined {
+  const code = formatCode?.trim().toLowerCase();
+  if (code) {
+    const hit = formats.find((f) => f.format_code.toLowerCase() === code);
+    if (hit) return hit;
+  }
+  return formats.find((f) => f.is_default);
 }
