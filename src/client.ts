@@ -72,6 +72,19 @@ export interface ImModel {
   duration_s_default?: number | null;
   duration_s_min?: number | null;
   duration_s_max?: number | null;
+  /** "image" | "video" — authoritative media kind from the catalog. */
+  model_type?: string;
+  family_name?: string;
+  /** "tags" (booru-style comma-separated tags) or "natural" (plain sentences). */
+  family_prompt_style?: string;
+  accepts_image_input?: boolean | null;
+  image_input_max?: number | null;
+  has_audio?: boolean | null;
+  /**
+   * Per-model parameter schema published by the API — the exact list
+   * ValidateParams enforces, so it cannot drift from what a request may send.
+   */
+  parameters?: unknown[];
   [key: string]: unknown;
 }
 
@@ -439,8 +452,13 @@ export class ImferenceClient {
   }
 }
 
-/** A model produces video when its engine/queue is wan-video based (same rule as the API). */
+/**
+ * The catalog's model_type is authoritative ("wan3-video" has a null engine and
+ * would slip through the heuristic); the engine/queue check remains as fallback
+ * for API builds that predate the field.
+ */
 export function isVideoModel(m: ImModel): boolean {
+  if (m.model_type) return m.model_type === "video";
   return m.im_engine === "wan22" || (m.queue ?? "").startsWith("wan-video");
 }
 

@@ -8,6 +8,7 @@ browse the model catalog, generate images and videos, and pay — with an API ke
 | Tool | Imference endpoint | Needs |
 |---|---|---|
 | `list_models` | `GET /api/models` | – |
+| `get_model` | `GET /api/models` + `/api/formats` | – |
 | `list_formats` | `GET /api/formats` | – |
 | `generate` | `POST /generate` or `POST /ondemand/generate` + polls `GET /ondemand/status` | API key or wallet |
 | `check_status` | `GET /ondemand/status` | – |

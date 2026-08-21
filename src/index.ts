@@ -138,9 +138,10 @@ server.registerTool(
   {
     title: "List Imference models",
     description:
-      "List the available generation models with their kind (image or video), cost in credits " +
-      "(1 credit = $0.001), and parameter defaults/ranges. Call this before generate to pick a " +
-      "valid model_code.",
+      "Overview of the generation models, made for PICKING the right one for the need: kind " +
+      "(image or video), style/family, one-line description, cost in credits (1 credit = " +
+      "$0.001), and capabilities (img2img, audio). Once a model is chosen, call get_model for " +
+      "its full description, recommended prompting and exact parameter bounds before generating.",
     inputSchema: {
       kind: z
         .enum(["image", "video", "all"])
@@ -158,25 +159,100 @@ server.registerTool(
           kind: isVideoModel(m) ? "video" : "image",
           cost_credits: m.im_cost,
           description: m.short_description || m.medium_description || m.description,
-          engine: m.im_engine || undefined,
-          steps: { default: m.steps_default, min: m.steps_min, max: m.steps_max },
-          guidance_scale: { default: m.cfg_default, min: m.cfg_min, max: m.cfg_max },
-          scheduler_default: m.scheduler_default || undefined,
-          duration_s:
-            m.duration_s_default != null
-              ? { default: m.duration_s_default, min: m.duration_s_min, max: m.duration_s_max }
-              : undefined,
-          frames:
-            m.frames_default != null
-              ? { default: m.frames_default, min: m.frames_min, max: m.frames_max }
-              : undefined,
-          fps:
-            m.fps_default != null
-              ? { default: m.fps_default, min: m.fps_min, max: m.fps_max }
-              : undefined,
+          family: m.family_name || undefined,
+          // How this model wants to be prompted — decisive for output quality.
+          prompt_style:
+            m.family_prompt_style === "tags"
+              ? "tags (comma-separated booru-style tags)"
+              : m.family_prompt_style === "natural"
+                ? "natural language"
+                : undefined,
+          img2img: m.accepts_image_input ? true : undefined,
+          audio: m.has_audio ? true : undefined,
+          max_duration_s: m.duration_s_max ?? undefined,
         }))
         .filter((m) => !kind || kind === "all" || m.kind === kind);
-      return ok({ count: rows.length, models: rows });
+      return ok({
+        count: rows.length,
+        models: rows,
+        note: "Call get_model with a model_code for full details (parameters, bounds, formats, prompting tips).",
+      });
+    } catch (e) {
+      return fail(e);
+    }
+  },
+);
+
+server.registerTool(
+  "get_model",
+  {
+    title: "Get full details of one model",
+    description:
+      "Everything about one model before generating with it: full description, how to prompt it " +
+      "(style and recommended prompt prefix), the exact parameters it accepts with bounds and " +
+      "defaults (the same list the API validates against — anything else is refused with a 400), " +
+      "its output formats with price multipliers, and its capabilities.",
+    inputSchema: {
+      model: z.string().describe("Model code from list_models"),
+    },
+  },
+  async ({ model }) => {
+    try {
+      const [models, formats] = await Promise.all([client.listModels(), client.listFormats()]);
+      const m = models.find((x) => x.model_code === model);
+      if (!m) {
+        return fail(
+          new ImferenceError(`Unknown model '${model}'. Use list_models to see valid model codes.`),
+        );
+      }
+      return ok({
+        model_code: m.model_code,
+        name: m.name,
+        kind: isVideoModel(m) ? "video" : "image",
+        family: m.family_name || undefined,
+        cost_credits: m.im_cost,
+        cost_note:
+          "Base cost per generation. Multiplied by the chosen format's credit_multiplier, " +
+          "by batch_nbr, and (video) by the clip duration over the model's default.",
+        description: m.medium_description || m.short_description || undefined,
+        details: m.description || undefined,
+        prompting: {
+          style:
+            m.family_prompt_style === "tags"
+              ? "tags — comma-separated booru-style tags (quality tags, subject, setting), not sentences"
+              : "natural language sentences",
+          // The API does NOT prepend it — the client is expected to.
+          recommended_prompt_prefix: m.prompt_pre
+            ? { value: m.prompt_pre, note: "Prepend this to your prompt yourself for best quality." }
+            : undefined,
+          default_negative_prompt: m.prompt_negative
+            ? {
+                value: m.prompt_negative,
+                note:
+                  "Applied by the server when negative_prompt is omitted. Sending your own " +
+                  "REPLACES it entirely — to add exclusions, include these tags plus yours.",
+              }
+            : undefined,
+        },
+        // The enforced schema: what generate may send for this model.
+        parameters: m.parameters ?? undefined,
+        formats: formats
+          .filter((f) => f.model_code === m.model_code)
+          .map((f) => ({
+            format_code: f.format_code,
+            width: f.width,
+            height: f.height,
+            ratio: f.ratio,
+            is_default: f.is_default,
+            credit_multiplier: f.credit_multiplier ?? 1,
+          })),
+        capabilities: {
+          image_input: m.accepts_image_input
+            ? { max_images: m.image_input_max ?? 1, note: "Pass a source image with img_url." }
+            : false,
+          audio: !!m.has_audio,
+        },
+      });
     } catch (e) {
       return fail(e);
     }
@@ -249,7 +325,8 @@ server.registerTool(
     title: "Generate an image or video",
     description:
       "Submit a generation request to Imference and wait for the result. The media kind (image " +
-      "or video) is determined by the model — use list_models to pick a model_code. Size and " +
+      "or video) is determined by the model — use list_models to pick a model_code, and " +
+      "get_model to learn how to prompt it and which parameters it accepts. Size and " +
       "aspect ratio are chosen with format_code (a predefined format from list_formats), never " +
       "with raw dimensions. Payment: " +
       "either the credits rail (API key balance) or the x402 rail (pay-per-generation in USDC " +

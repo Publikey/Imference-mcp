@@ -80,7 +80,12 @@ test("GET retries on 5xx then succeeds", async () => {
   assert.equal(calls, 3);
 });
 
-test("isVideoModel matches wan22 engine and wan-video queues", () => {
+test("isVideoModel trusts model_type, falls back to the engine/queue heuristic", () => {
+  // model_type is authoritative: wan3-video has a null engine and a queue the
+  // heuristic doesn't know.
+  assert.equal(isVideoModel({ model_type: "video", im_engine: null }), true);
+  assert.equal(isVideoModel({ model_type: "image", im_engine: "wan22" }), false);
+  // Older API builds without model_type keep the heuristic.
   assert.equal(isVideoModel({ im_engine: "wan22" }), true);
   assert.equal(isVideoModel({ queue: "wan-video.normal" }), true);
   assert.equal(isVideoModel({ im_engine: "sdxl", queue: "sdxl-multimodel.normal" }), false);
