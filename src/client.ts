@@ -102,6 +102,40 @@ export interface ImFormat {
   credit_multiplier?: number | null;
 }
 
+/**
+ * One curated LoRA from GET /api/loras (the im_lora catalog). A LoRA goes on a
+ * model whose family code is in compatible_family_codes; weights must stay in
+ * [weight_min, weight_max] (weight_default when omitted).
+ */
+export interface ImLora {
+  lora_code: string;
+  name: string;
+  short_name?: string;
+  short_description?: string;
+  medium_description?: string;
+  description?: string;
+  image?: string;
+  /** style | character | concept | clothing | pose | detail | other */
+  category?: string;
+  im_engine?: string;
+  model_family_code?: string;
+  family_name?: string;
+  compatible_family_codes: string[];
+  trigger_words: string[];
+  /** false = the LoRA learned no token: trigger words are optional. */
+  text_encoder_trained?: boolean;
+  weight_default: number;
+  weight_min: number;
+  weight_max: number;
+  [key: string]: unknown;
+}
+
+/** A LoRA on a generate request: a lora_code from GET /api/loras + an optional weight. */
+export interface LoraRequest {
+  code: string;
+  weight?: number;
+}
+
 /** /status and /media/all rows marshal Go struct fields verbatim (untagged). */
 export interface MediaRow {
   RequestID: string;
@@ -137,7 +171,12 @@ export interface GeneratePayload {
   scheduler?: string;
   format_code?: string;
   duration_s?: number;
+  /** Curated LoRAs (codes from GET /api/loras), at most MAX_LORAS. Same price. */
+  loras?: LoraRequest[];
 }
+
+/** LoRAs per generation (mirrors the API's cap). */
+export const MAX_LORAS = 4;
 
 export type StatusResult =
   | { state: "pending" }
@@ -328,6 +367,17 @@ export class ImferenceClient {
     return body.formats ?? [];
   }
 
+  /** Curated LoRAs; with `model`, only those that go on that model. */
+  async listLoras(model?: string): Promise<ImLora[]> {
+    const res = await this.getWithRetry(
+      this.url("/api/loras", model ? { model } : undefined),
+      this.headers(false),
+    );
+    if (!res.ok) throw new ImferenceError(await this.parseError(res), res.status);
+    const body = (await res.json()) as { loras: ImLora[] };
+    return body.loras ?? [];
+  }
+
   async generate(payload: GeneratePayload): Promise<{ request_id: string; kind: string }> {
     const res = await fetch(this.url("/generate"), {
       method: "POST",
@@ -457,6 +507,13 @@ export class ImferenceClient {
  * would slip through the heuristic); the engine/queue check remains as fallback
  * for API builds that predate the field.
  */
+/** True when the API publishes a `loras` parameter for this model. */
+export function acceptsLoras(m: ImModel): boolean {
+  return (m.parameters ?? []).some(
+    (p) => typeof p === "object" && p !== null && (p as { name?: unknown }).name === "loras",
+  );
+}
+
 export function isVideoModel(m: ImModel): boolean {
   if (m.model_type) return m.model_type === "video";
   return m.im_engine === "wan22" || (m.queue ?? "").startsWith("wan-video");

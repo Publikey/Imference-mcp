@@ -15,6 +15,9 @@ Works with any MCP client: Claude Code, Claude Desktop, Cursor, etc.
 - **Per-model prompting knowledge** — `get_model` tells the agent whether a
   model wants booru tags or natural language, the recommended quality prefix,
   and the default negative prompt.
+- **LoRAs on request** — stack curated LoRAs (styles, characters, effects) with
+  pre-tuned weights, on SDXL, Pony, Illustrious, Z-Image, Krea 2 and Anima
+  models. Opt-in: the agent only adds one when you ask for it.
 - **Two payment rails** — a classic prepaid API key, or pay-per-generation in
   USDC on Base ([x402](https://www.x402.org/)) straight from a wallet, with
   hard spending caps enforced server-side.
@@ -67,6 +70,7 @@ recommended quality tags, pick a banner format, generate, and show the result.
 | `list_models` | Model overview for picking: kind, style family, prompt style, cost, capabilities | – |
 | `get_model` | One model in full: description, prompting recommendations, exact parameters & bounds, formats & price multipliers | – |
 | `list_formats` | Predefined output formats per model (`square`, `portrait`, `landscape-wide`, …) | – |
+| `list_loras` | Curated LoRAs: category, compatible families, weight bounds, trigger words | – |
 | `generate` | Submit a generation and wait; embeds the finished image in the result | API key or wallet |
 | `check_status` | Poll a still-running generation | – |
 | `download_media` | Save an image or video to a local file | – |
@@ -142,6 +146,19 @@ and `check_status` work without any credential.
 4. Returns the media URL, and embeds the image (≤ 3 MB) in the result so the
    agent can see it. `download_media` saves it locally — generated URLs live
    on ephemeral storage, so download what you want to keep.
+
+### LoRAs
+
+`generate` takes `loras: [{ code, weight? }]` (at most 4, codes from
+`list_loras`, the LoRA's default weight when omitted, same price). The API
+checks that each LoRA fits the model's family and that the weight is in
+bounds. Trigger words are not added for you: put them in the prompt.
+
+LoRAs are **opt-in by design**. A LoRA strongly changes the output — some are
+deliberately lo-fi or stylized — so the tool descriptions tell the agent to
+use one only when the user asks for it (or for a style/effect only a LoRA
+provides), and otherwise to suggest it rather than add it. `get_model` only
+flags whether a model accepts LoRAs; it doesn't list them.
 
 Full API reference: [imference.com/docs](https://imference.com/docs).
 

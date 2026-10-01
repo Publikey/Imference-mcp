@@ -23,10 +23,12 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 import {
+  acceptsLoras,
   computeCreditCost,
   ImferenceClient,
   ImferenceError,
   isVideoModel,
+  MAX_LORAS,
   MAX_X402_CREDITS_TOPUP,
   MIN_X402_CREDITS_TOPUP,
   resolveFormat,
@@ -59,7 +61,7 @@ const DEFAULT_MODEL = process.env.IMFERENCE_DEFAULT_MODEL;
 
 const server = new McpServer({
   name: "imference",
-  version: "0.1.0",
+  version: "0.2.0",
 });
 
 type ContentBlock =
@@ -251,6 +253,10 @@ server.registerTool(
             ? { max_images: m.image_input_max ?? 1, note: "Pass a source image with img_url." }
             : false,
           audio: !!m.has_audio,
+          // Opt-in only — see list_loras. A flag, not a list, on purpose.
+          loras: acceptsLoras(m)
+            ? { max: MAX_LORAS, note: "Only when the user asks for one — see list_loras." }
+            : false,
         },
       });
     } catch (e) {
@@ -276,6 +282,68 @@ server.registerTool(
       const formats = await client.listFormats();
       const rows = formats.filter((f) => !model || f.model_code === model);
       return ok({ count: rows.length, formats: rows });
+    } catch (e) {
+      return fail(e);
+    }
+  },
+);
+
+const LORA_OPT_IN =
+  "LoRAs are OPT-IN: only use one when the user explicitly asks for a LoRA, or for a specific " +
+  "style / character / effect they want added that the model can't do on its own. A LoRA " +
+  "strongly changes the output (some are deliberately lo-fi or stylized), so never add one " +
+  "on your own initiative to 'improve' an image — if one looks relevant, SUGGEST it to the " +
+  "user and wait for their go-ahead.";
+
+server.registerTool(
+  "list_loras",
+  {
+    title: "List curated LoRAs",
+    description:
+      "List the curated LoRAs (add-ons that push a style, character or effect on top of a " +
+      "model) with their pre-tuned weights and trigger words. " +
+      LORA_OPT_IN +
+      " Don't call this before every generation — only when LoRAs are in play. Pass model to " +
+      "keep the ones that go on that model (a LoRA only works on its compatible families).",
+    inputSchema: {
+      model: z.string().optional().describe("Only the LoRAs compatible with this model_code"),
+      category: z
+        .string()
+        .optional()
+        .describe("Filter by category: style, character, concept, clothing, pose, detail, other"),
+    },
+  },
+  async ({ model, category }) => {
+    try {
+      const loras = await client.listLoras(model);
+      const rows = loras
+        .filter((l) => !category || l.category === category)
+        .map((l) => ({
+          lora_code: l.lora_code,
+          name: l.name,
+          category: l.category || undefined,
+          description: l.medium_description || l.short_description || undefined,
+          // Full write-up: usually carries the creator's prompting tips.
+          details: l.description || undefined,
+          compatible_families: l.compatible_family_codes,
+          weight: { default: l.weight_default, min: l.weight_min, max: l.weight_max },
+          trigger_words: l.trigger_words.length
+            ? {
+                words: l.trigger_words,
+                note:
+                  l.text_encoder_trained === false
+                    ? "Optional: this LoRA applies regardless of the prompt; the words can reinforce it."
+                    : "Add them to the prompt yourself — the server doesn't.",
+              }
+            : undefined,
+        }));
+      return ok({
+        count: rows.length,
+        loras: rows,
+        usage:
+          `Pass loras: [{ code: lora_code, weight? }] to generate (at most ${MAX_LORAS}; ` +
+          "weight_default when omitted; same price). " + LORA_OPT_IN,
+      });
     } catch (e) {
       return fail(e);
     }
@@ -381,6 +449,23 @@ server.registerTool(
         .url()
         .optional()
         .describe("Source image URL — for img2img on image models, or image-to-video on video models"),
+      loras: z
+        .array(
+          z.object({
+            code: z.string().describe("lora_code from list_loras"),
+            weight: z
+              .number()
+              .optional()
+              .describe("Strength within the LoRA's weight bounds (its default if omitted)"),
+          }),
+        )
+        .max(MAX_LORAS)
+        .optional()
+        .describe(
+          "OMIT unless the user asked for it. Curated LoRAs to stack on the model (codes from " +
+            "list_loras, compatible with the model; same price). " +
+            LORA_OPT_IN,
+        ),
       num_frames: z.number().int().positive().optional().describe("Video only: number of frames"),
       fps: z.number().int().positive().optional().describe("Video only: frames per second"),
       duration_s: z
@@ -474,7 +559,10 @@ server.registerTool(
         }
         if (status.state === "done") {
           const preview = include_image === false ? [] : await imagePreview(status.media);
-          return ok({ status: "done", rail, payment, ...mediaSummary(status.media) }, preview);
+          return ok(
+            { status: "done", rail, payment, loras: payload.loras, ...mediaSummary(status.media) },
+            preview,
+          );
         }
       }
 
@@ -484,6 +572,7 @@ server.registerTool(
         kind,
         rail,
         payment,
+        loras: payload.loras,
         note:
           `Generation still running after ${waitMs / 1000}s. ` +
           `Poll it with the check_status tool (request_id: ${request_id}).`,

@@ -13,6 +13,7 @@ import {
   resolveFormat,
   usdToAtomic,
   isVideoModel,
+  acceptsLoras,
 } from "../dist/client.js";
 
 // Well-known Hardhat test key #0 — public, never fund it.
@@ -131,6 +132,35 @@ test("generate posts the payload with the Bearer key", async () => {
   assert.deepEqual(out, { request_id: "r1", kind: "image" });
   assert.equal(requests[0].headers.authorization, "Bearer sk-test");
   assert.deepEqual(JSON.parse(requests[0].body), { model: "flux", prompt: "a cat" });
+});
+
+test("listLoras parses the envelope and forwards the model filter", async () => {
+  let query;
+  routes["/api/loras"] = (req, res) => {
+    query = new URL(req.url, "http://x").searchParams.get("model");
+    json(res, 200, {
+      loras: [{ lora_code: "detail-tweaker-xl", name: "Detail Tweaker XL", compatible_family_codes: ["sdxl"],
+        trigger_words: [], weight_default: 1.5, weight_min: -3, weight_max: 3 }],
+    });
+  };
+  const loras = await makeClient().listLoras("cyberrealistic-xl");
+  assert.equal(query, "cyberrealistic-xl");
+  assert.equal(loras[0].lora_code, "detail-tweaker-xl");
+  await makeClient().listLoras();
+  assert.equal(query, null);
+});
+
+test("acceptsLoras reads the published parameter list", () => {
+  assert.equal(acceptsLoras({ parameters: [{ name: "steps" }, { name: "loras" }] }), true);
+  assert.equal(acceptsLoras({ parameters: [{ name: "steps" }] }), false);
+  assert.equal(acceptsLoras({}), false);
+});
+
+test("generate forwards loras untouched", async () => {
+  routes["/generate"] = (_req, res) => json(res, 200, { request_id: "r2", kind: "image" });
+  const loras = [{ code: "detail-tweaker-xl", weight: 0.8 }, { code: "realistic-snapshot-krea2" }];
+  await makeClient({ apiKey: "sk-test" }).generate({ model: "m", prompt: "p", loras });
+  assert.deepEqual(JSON.parse(requests[0].body).loras, loras);
 });
 
 test("generate without an API key fails before any network call", async () => {
