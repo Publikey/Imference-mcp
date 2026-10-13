@@ -1,7 +1,7 @@
 {
   "name": "imference-mcp",
-  "version": "0.2.0",
-  "description": "MCP server for the Imference AI image & video generation API (imference.com)",
+  "version": "0.3.0",
+  "description": "MCP server for the Imference AI image & video generation API and editing tools (imference.com)",
   "type": "module",
   "license": "MIT",
   "author": "Publikey",
@@ -23,7 +23,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "tsc && node -e \"require('fs').chmodSync('dist/index.js', 0o755)\"",
+    "build": "tsc && node -e \"const fs=require('fs');fs.copyFileSync('src/tools-catalog.json','dist/tools-catalog.json');fs.chmodSync('dist/index.js',0o755)\"",
     "prepublishOnly": "npm test",
     "start": "node dist/index.js",
     "dev": "tsc --watch",
@@ -38,7 +38,10 @@
     "text-to-image",
     "text-to-video",
     "x402",
-    "claude"
+    "claude",
+    "image-editing",
+    "remove-background",
+    "upscale"
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

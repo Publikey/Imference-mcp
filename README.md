@@ -3,7 +3,9 @@
 MCP server for [Imference](https://imference.com) — AI image & video generation
 for agents. 45+ image models and 3 video models behind four tools an LLM can
 drive end-to-end: browse the catalog, learn how to prompt each model, generate,
-and see the result.
+and see the result. Plus a set of editing tools (remove background, upscale,
+describe, inpaint, crop, video trim…) that run in the cloud or locally, for
+free, in [Imference Desktop](#editing-tools).
 
 Works with any MCP client: Claude Code, Claude Desktop, Cursor, etc.
 
@@ -18,6 +20,9 @@ Works with any MCP client: Claude Code, Claude Desktop, Cursor, etc.
 - **LoRAs on request** — stack curated LoRAs (styles, characters, effects) with
   pre-tuned weights, on SDXL, Pony, Illustrious, Z-Image, Krea 2 and Anima
   models. Opt-in: the agent only adds one when you ask for it.
+- **Editing tools, local or cloud** — remove backgrounds, upscale, caption,
+  inpaint/outpaint, crop, convert, trim and join videos. They run for free on
+  your machine when Imference Desktop is open, in the cloud otherwise.
 - **Two payment rails** — a classic prepaid API key, or pay-per-generation in
   USDC on Base ([x402](https://www.x402.org/)) straight from a wallet, with
   hard spending caps enforced server-side.
@@ -79,10 +84,78 @@ recommended quality tags, pick a banner format, generate, and show the result.
 | `buy_credits_with_wallet` | Top up (or mint) an API key with one USDC payment | wallet |
 | `wallet_balance` | USDC balance of the configured wallet (read-only) | wallet |
 | `payment_config` | Which rails are configured, caps, session spend | – |
+| `list_tools` | Editing tools with prices, cloud/local availability, and whether Imference Desktop is running | – |
+| `remove_background`, `upscale`, `describe_image`, … | One tool per editing tool — see [Editing tools](#editing-tools) | API key or wallet (cloud), Imference Desktop (local) |
 
 Output size and aspect ratio are selected with `format_code` — a predefined
 format the API translates into dimensions and that carries the price
 multiplier. Raw width/height are deliberately not exposed.
+
+## Editing tools
+
+Each tool of the Imference editing catalog is its own MCP tool. The list comes
+from `GET /api/tools` at startup (a snapshot ships with the package and is used
+when the API can't be reached within 2.5 s), so new tools appear without an
+update. Current catalog:
+
+| Tool | What it does | Cloud price |
+|---|---|---|
+| `remove_background` | Cut out the subject: transparent PNG, a mask, or a solid color | 3 credits |
+| `upscale` | ×2 / ×4 super-resolution | 4 credits |
+| `describe_image` | Detailed caption, ready to reuse as a prompt | 2 credits |
+| `select_object` | Mask of an object from one or more clicks (`points`) | 1 credit |
+| `erase_object` | Remove the masked object and fill the hole | 4 credits |
+| `restore_faces` | Restore faces (local only) | – |
+| `crop`, `resize`, `convert`, `strip_metadata` | Basic image edits | 1 credit |
+| `inpaint`, `outpaint`, `vary_image` | Repaint a masked area, extend the canvas, make a variation — with a generation `model` | the model's price |
+| `video_trim`, `video_convert`, `video_concat`, `interpolate_frames` | Video edits | 2–6 credits |
+
+`list_tools` shows the live list, prices, and where each tool can run right now.
+
+**Inputs** take a local file path, an https URL or a `data:` URI (a list for
+multi-file inputs like `video_concat`'s `videos`). Params are validated here
+with the same rules as the engine — a bad value fails with `invalid_input`
+before anything is uploaded or paid.
+
+**`run_on`** picks where the tool runs:
+
+- `auto` (default) — locally in Imference Desktop when it's running and can run
+  this tool, else in the cloud. If the local run fails with `oom`,
+  `unsupported_runtime` or `weights_missing`, it is retried in the cloud and
+  the result says so (`"ran in the cloud because local failed with oom: …"`) —
+  never silently.
+- `local` — Imference Desktop only (free; files never leave the machine).
+  Fails with a clear message when Desktop isn't running.
+- `cloud` — the Imference API, paid with the same rails as `generate`
+  (credits or x402, `rail` argument). Local files are uploaded (multipart);
+  URLs and data URIs are passed as-is. The x402 price is the tool's credits ×
+  $0.001 (generation tools: the model's price), checked against the spending
+  guards before paying.
+
+**Local runs** use Imference Desktop's local API, found through the file
+Desktop writes at start (`<config dir>/imference-desktop-go/local-api.json`:
+`%APPDATA%` on Windows, `~/Library/Application Support` on macOS,
+`$XDG_CONFIG_HOME` or `~/.config` on Linux), or `IMFERENCE_DESKTOP_URL` +
+`IMFERENCE_DESKTOP_TOKEN`. Outputs are local file paths.
+
+**Results** are a JSON summary — `ran` (`local` / `cloud`), `request_id`
+(`"local"` for local runs), `outputs` (`url` or `path`, `format`, …), `text`
+for `describe_image`, `credits`, `duration_ms` — plus the image outputs
+embedded (≤ 3 MB) so the agent can see them. A cloud run still going after
+`wait_seconds` (default 120) returns its `request_id` for `check_status`.
+
+Examples — just ask your agent:
+
+> Remove the background of ~/Pictures/product.jpg and upscale the result ×2.
+
+> Describe this image and generate a variation of it with a different model:
+> https://example.com/photo.png
+
+> Trim ~/clips/intro.mp4 to the first 5 seconds, in the cloud.
+
+Errors carry the catalog code: `invalid_input` and `too_large` (never charged),
+`unsupported_runtime`, `weights_missing`, `oom`, `timeout`, `internal`; plus
+`desktop_unavailable` / `not_available` for routing.
 
 ## Payment rails
 
@@ -130,9 +203,13 @@ guard runs **before** any signing or network call:
 | `IMFERENCE_X402_SESSION_MAX_USD` | – | Cumulative x402 cap per process (default: off) |
 | `IMFERENCE_BASE_RPC_URL` | – | Base RPC for `wallet_balance` (default `https://mainnet.base.org`) |
 | `IMFERENCE_BASE_URL` | – | API base URL (default `https://imference.com`) |
+| `IMFERENCE_DESKTOP_URL` | – | Imference Desktop local API URL (default: read from Desktop's discovery file) |
+| `IMFERENCE_DESKTOP_TOKEN` | – | Bearer token for `IMFERENCE_DESKTOP_URL` |
+| `IMFERENCE_TOOLS_CATALOG` | – | `bundled` = don't fetch the live editing-tool catalog at startup |
 
-At least one of the two credentials is needed to generate. The catalog tools
-and `check_status` work without any credential.
+At least one of the two credentials is needed to generate or to run an editing
+tool in the cloud. The catalog tools, `check_status` and local editing-tool runs
+(Imference Desktop) work without any credential.
 
 ## How `generate` works
 
@@ -167,8 +244,12 @@ Full API reference: [imference.com/docs](https://imference.com/docs).
 ```bash
 npm install
 npm run build
-npm test        # unit tests — mock HTTP server, no network, no real payments
+npm test        # unit tests — mock HTTP servers, no network, no real payments
 ```
+
+The editing-tool catalog snapshot is `src/tools-catalog.json`; refresh it from
+the engine when manifests change:
+`python -m imference_engine.tools export > src/tools-catalog.json`.
 
 Requires Node.js ≥ 18. Run the server locally instead of via npx:
 

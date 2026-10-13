@@ -10,6 +10,9 @@
  *   IMFERENCE_X402_SESSION_MAX_USD cumulative x402 cap for this process (default: off)
  *   IMFERENCE_BASE_RPC_URL         Base mainnet RPC for wallet_balance (default mainnet.base.org)
  *   IMFERENCE_BASE_URL             API base URL (default https://imference.com)
+ *   IMFERENCE_DESKTOP_URL / _TOKEN override Imference Desktop's local API discovery
+ *                                  (default: <UserConfigDir>/imference-desktop-go/local-api.json)
+ *   IMFERENCE_TOOLS_CATALOG        'bundled' = skip fetching the live editing-tool catalog
  *
  * At least one of API key / wallet is needed to generate; catalog tools and
  * status polling work without any credential.
@@ -35,6 +38,20 @@ import {
   type GeneratePayload,
   type MediaRow,
 } from "./client.js";
+import { loadCatalog, type Catalog } from "./catalog.js";
+import { DesktopClient } from "./desktop.js";
+import { fail, ok, previewFromUrl, type ContentBlock } from "./results.js";
+import {
+  buildMcpTool,
+  isToolMedia,
+  listToolsSummary,
+  previewOutputs,
+  resolveRail as resolveRailFor,
+  runEditTool,
+  summarizeToolMedia,
+  waitForStatus,
+  type ToolsContext,
+} from "./tools.js";
 
 function envNumber(name: string, fallback?: number): number | undefined {
   const raw = process.env[name];
@@ -61,31 +78,8 @@ const DEFAULT_MODEL = process.env.IMFERENCE_DEFAULT_MODEL;
 
 const server = new McpServer({
   name: "imference",
-  version: "0.2.0",
+  version: "0.3.0",
 });
-
-type ContentBlock =
-  | { type: "text"; text: string }
-  | { type: "image"; data: string; mimeType: string };
-
-type ToolResult = {
-  content: ContentBlock[];
-  isError?: boolean;
-};
-
-function ok(data: unknown, extra: ContentBlock[] = []): ToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }, ...extra] };
-}
-
-function fail(err: unknown): ToolResult {
-  const message =
-    err instanceof ImferenceError
-      ? `Imference API error${err.status ? ` (HTTP ${err.status})` : ""}: ${err.message}`
-      : err instanceof Error
-        ? err.message
-        : String(err);
-  return { content: [{ type: "text", text: message }], isError: true };
-}
 
 function mediaSummary(m: MediaRow) {
   return {
@@ -98,19 +92,6 @@ function mediaSummary(m: MediaRow) {
   };
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-/** Don't embed images past this size — keeps tool results within client limits. */
-const MAX_EMBED_BYTES = 3 * 1024 * 1024;
-
-const MIME_BY_FORMAT: Record<string, string> = {
-  webp: "image/webp",
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  gif: "image/gif",
-};
-
 /**
  * Best-effort inline preview of a finished image so the agent can SEE the
  * result and iterate on its prompt. Skips videos, oversized files, and any
@@ -118,17 +99,7 @@ const MIME_BY_FORMAT: Record<string, string> = {
  */
 async function imagePreview(media: MediaRow): Promise<ContentBlock[]> {
   if (media.Kind !== "image") return [];
-  try {
-    const { bytes, contentType } = await client.downloadMedia(media.URL);
-    if (bytes.length > MAX_EMBED_BYTES) return [];
-    const mime = contentType.startsWith("image/")
-      ? contentType.split(";")[0]
-      : MIME_BY_FORMAT[media.Format?.toLowerCase() ?? ""];
-    if (!mime) return [];
-    return [{ type: "image", data: bytes.toString("base64"), mimeType: mime }];
-  } catch {
-    return [];
-  }
+  return previewFromUrl(client, media.URL, media.Format);
 }
 
 // ---------------------------------------------------------------------------
@@ -354,37 +325,8 @@ server.registerTool(
 // Generation tools (require IMFERENCE_API_KEY)
 // ---------------------------------------------------------------------------
 
-/**
- * Picks the payment rail: explicit request wins, otherwise credits (API key)
- * when configured, otherwise x402 (wallet).
- */
 function resolveRail(requested?: "credits" | "x402"): "credits" | "x402" {
-  if (requested === "credits") {
-    if (!client.hasApiKey) {
-      throw new ImferenceError(
-        "rail 'credits' requested but IMFERENCE_API_KEY is not set. " +
-          (client.hasWallet
-            ? "Either set an API key, use rail 'x402', or buy a key with buy_credits_with_wallet."
-            : "Set IMFERENCE_API_KEY (get one at https://imference.com)."),
-      );
-    }
-    return "credits";
-  }
-  if (requested === "x402") {
-    if (!client.hasWallet) {
-      throw new ImferenceError(
-        "rail 'x402' requested but IMFERENCE_WALLET_PRIVATE_KEY is not set. " +
-          "The x402 rail needs an EVM wallet holding USDC on Base.",
-      );
-    }
-    return "x402";
-  }
-  if (client.hasApiKey) return "credits";
-  if (client.hasWallet) return "x402";
-  throw new ImferenceError(
-    "No payment method configured. Set IMFERENCE_API_KEY (credits rail) and/or " +
-      "IMFERENCE_WALLET_PRIVATE_KEY (x402 rail, USDC on Base).",
-  );
+  return resolveRailFor(client, requested);
 }
 
 server.registerTool(
@@ -547,23 +489,16 @@ server.registerTool(
       }
 
       const waitMs = (wait_seconds ?? 120) * 1000;
-      const deadline = Date.now() + waitMs;
-      let pollDelay = 2000;
-
-      while (Date.now() < deadline) {
-        await sleep(Math.min(pollDelay, Math.max(0, deadline - Date.now())));
-        pollDelay = Math.min(pollDelay * 1.5, 10_000);
-        const status = await client.status(request_id);
-        if (status.state === "failed") {
-          return fail(new ImferenceError(status.error));
-        }
-        if (status.state === "done") {
-          const preview = include_image === false ? [] : await imagePreview(status.media);
-          return ok(
-            { status: "done", rail, payment, loras: payload.loras, ...mediaSummary(status.media) },
-            preview,
-          );
-        }
+      const status = await waitForStatus(client, request_id, waitMs);
+      if (status.state === "failed") {
+        return fail(new ImferenceError(status.error, undefined, status.code));
+      }
+      if (status.state === "done") {
+        const preview = include_image === false ? [] : await imagePreview(status.media);
+        return ok(
+          { status: "done", rail, payment, loras: payload.loras, ...mediaSummary(status.media) },
+          preview,
+        );
       }
 
       return ok({
@@ -586,12 +521,13 @@ server.registerTool(
 server.registerTool(
   "check_status",
   {
-    title: "Check a generation request",
+    title: "Check a generation or tool request",
     description:
-      "Check the status of a previously submitted generation. Returns the media URL when done, " +
-      "'pending' while still running, or the failure reason.",
+      "Check the status of a previously submitted generation or cloud editing-tool run. Returns " +
+      "the media URL (tools: every output, plus the text of describe_image) when done, 'pending' " +
+      "while still running, or the failure reason.",
     inputSchema: {
-      request_id: z.string().describe("The request_id returned by generate"),
+      request_id: z.string().describe("The request_id returned by generate or an editing tool"),
       include_image: z
         .boolean()
         .optional()
@@ -602,10 +538,15 @@ server.registerTool(
     try {
       const status = await client.status(request_id);
       if (status.state === "done") {
+        if (isToolMedia(status.media)) {
+          const summary = summarizeToolMedia(status.media);
+          const preview = include_image === false ? [] : await previewOutputs(client, summary.outputs);
+          return ok({ status: "done", ...summary }, preview);
+        }
         const preview = include_image === false ? [] : await imagePreview(status.media);
         return ok({ status: "done", ...mediaSummary(status.media) }, preview);
       }
-      if (status.state === "failed") return fail(new ImferenceError(status.error));
+      if (status.state === "failed") return fail(new ImferenceError(status.error, undefined, status.code));
       return ok({ status: "pending", request_id });
     } catch (e) {
       return fail(e);
@@ -797,8 +738,74 @@ server.registerTool(
 );
 
 // ---------------------------------------------------------------------------
+// Editing tools (one MCP tool per catalog entry) + list_tools
+// ---------------------------------------------------------------------------
+
+const desktop = new DesktopClient();
+const toolsCtx: ToolsContext = { client, desktop };
+
+function registerEditingTools(catalog: Catalog): void {
+  server.registerTool(
+    "list_tools",
+    {
+      title: "List editing tools",
+      description:
+        "List the image/video editing tools (remove background, upscale, describe, inpaint, " +
+        "crop, convert, video trim/join...) with their price per cloud run (1 credit = $0.001), " +
+        "whether each runs in the cloud and/or locally in Imference Desktop (free), and whether " +
+        "Desktop is running right now. Each tool is also its own MCP tool (the `tool` name).",
+      inputSchema: {
+        category: z
+          .enum(["image", "video", "generation", "all"])
+          .optional()
+          .describe("Filter by category (default: all)"),
+      },
+    },
+    async ({ category }) => {
+      try {
+        return ok(listToolsSummary(catalog, await desktop.probe(), category));
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
+
+  const taken = new Set([
+    "list_models", "get_model", "list_formats", "list_loras", "generate", "check_status",
+    "download_media", "get_balance", "buy_credits_with_wallet", "payment_config",
+    "wallet_balance", "list_media", "list_tools",
+  ]);
+  for (const tool of catalog.tools) {
+    if (taken.has(tool.mcp_name)) {
+      console.error(`Skipping editing tool '${tool.id}': MCP name '${tool.mcp_name}' is already used`);
+      continue;
+    }
+    let def;
+    try {
+      def = buildMcpTool(tool);
+    } catch (e) {
+      console.error(`Skipping editing tool '${tool.id}': ${e instanceof Error ? e.message : e}`);
+      continue;
+    }
+    taken.add(def.name);
+    server.registerTool(
+      def.name,
+      { title: def.title, description: def.description, inputSchema: def.inputSchema },
+      async (args: unknown) => runEditTool(toolsCtx, def, (args ?? {}) as Record<string, unknown>),
+    );
+  }
+}
 
 async function main() {
+  const catalog = await loadCatalog(client, {
+    timeoutMs: 2500,
+    bundledOnly: process.env.IMFERENCE_TOOLS_CATALOG === "bundled",
+  });
+  if (catalog.source === "bundled" && catalog.fallback_reason) {
+    console.error(`Editing tools: using the bundled catalog (${catalog.fallback_reason})`);
+  }
+  registerEditingTools(catalog);
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("imference-mcp server running on stdio");
