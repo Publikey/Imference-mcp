@@ -628,6 +628,15 @@ export function acceptsLoras(m: ImModel): boolean {
   );
 }
 
+/**
+ * True for instruction-edit models (catalog engine "qwenimage-edit", e.g.
+ * qwen-image-edit-2511): they edit an input image from a plain-words
+ * instruction through the edit_with_instructions tool, not generate.
+ */
+export function isEditModel(m: ImModel): boolean {
+  return (m.im_engine ?? "").startsWith("qwenimage-edit");
+}
+
 export function isVideoModel(m: ImModel): boolean {
   if (m.model_type) return m.model_type === "video";
   return m.im_engine === "wan22" || (m.queue ?? "").startsWith("wan-video");

@@ -453,6 +453,32 @@ export const CONTROL_ARGS = ["run_on", "wait_seconds", "include_image", "rail"] 
 
 export type RunOn = "auto" | "local" | "cloud";
 
+/** Built-in default model of the instruction-edit tool (instruct-edit). */
+export const DEFAULT_EDIT_MODEL = "qwen-image-edit-2511";
+
+/** Catalog engine (im_engine) of the instruction-edit models. */
+export const EDIT_MODEL_ENGINE = "qwenimage-edit";
+
+/**
+ * Model used when the caller omits `model`: only the instruction-edit tool has
+ * one (IMFERENCE_DEFAULT_EDIT_MODEL, else qwen-image-edit-2511). Every other
+ * generation tool keeps the manifest's "model is required".
+ */
+export function defaultModelFor(tool: CatalogTool, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (tool.id !== "instruct-edit" || !tool.params.model) return undefined;
+  return env.IMFERENCE_DEFAULT_EDIT_MODEL?.trim() || DEFAULT_EDIT_MODEL;
+}
+
+/** Extra guidance for agents, appended to a tool's description (by tool id). */
+const TOOL_HINTS: Record<string, string> = {
+  "instruct-edit":
+    "Write `instruction` as one plain, specific edit, e.g. \"replace the background with a beach at sunset\", " +
+    "\"remove the person on the left\", \"change the text on the sign to OPEN\", \"make it a watercolor painting\". " +
+    "Everything not mentioned is kept. Optional `references` (up to 2 images) are referred to in the " +
+    "instruction as image 2 and image 3 (the edited `image` is image 1), e.g. \"put the hat from image 2 on " +
+    "the man\". For a masked region use inpaint; for a new image from scratch use generate.",
+};
+
 export interface McpToolDef {
   name: string;
   title: string;
@@ -461,6 +487,8 @@ export interface McpToolDef {
   inputSchema: z.ZodObject<Record<string, ZodTypeAny>>;
   /** MCP argument name → manifest param name (differs only on a name clash). */
   paramArgs: Record<string, string>;
+  /** Param values used when the caller omits them (instruct-edit's model). */
+  paramDefaults: Record<string, unknown>;
   tool: CatalogTool;
 }
 
@@ -580,7 +608,7 @@ export function priceText(tool: CatalogTool): string {
   return `Price in the cloud: ${c} credit${c === 1 ? "" : "s"} ($${(c * 0.001).toFixed(3)}) per run.`;
 }
 
-export function whereText(tool: CatalogTool): string {
+export function whereText(tool: CatalogTool, defaultModel?: string): string {
   const local = tool.runtimes?.local ?? [];
   const cloud = isCloudAvailable(tool);
   const localPart = local.length
@@ -588,7 +616,10 @@ export function whereText(tool: CatalogTool): string {
     : "";
   if (isGenerationTool(tool)) {
     return (
-      "Needs a generation model: pass `model` (a model_code from list_models that accepts an image input). " +
+      (defaultModel
+        ? `Uses an instruction-edit model: \`model\` defaults to '${defaultModel}' (other edit models: ` +
+          `list_models entries marked edit_model / engine '${EDIT_MODEL_ENGINE}'). `
+        : "Needs a generation model: pass `model` (a model_code from list_models that accepts an image input). ") +
       "Runs in the cloud on that model's workers" +
       (local.length ? "; locally only when Imference Desktop reports it available (GPU)." : ".")
     );
@@ -608,16 +639,19 @@ function outputsText(tool: CatalogTool): string {
 }
 
 /** Build the MCP tool (name, description, zod schema) of one catalog entry. */
-export function buildMcpTool(tool: CatalogTool): McpToolDef {
+export function buildMcpTool(tool: CatalogTool, env: NodeJS.ProcessEnv = process.env): McpToolDef {
   const shape: Record<string, ZodTypeAny> = {};
   for (const [name, spec] of Object.entries(tool.inputs)) shape[name] = inputSchemaFor(name, spec);
 
+  const defaultModel = defaultModelFor(tool, env);
+  const paramDefaults: Record<string, unknown> = defaultModel ? { model: defaultModel } : {};
   const paramArgs: Record<string, string> = {};
   for (const [name, spec] of Object.entries(tool.params)) {
     let arg = name;
     if (arg in shape || (CONTROL_ARGS as readonly string[]).includes(arg)) arg = `param_${name}`;
     paramArgs[arg] = name;
-    shape[arg] = paramSchema(name, spec);
+    // A param with a client-side default is optional for the caller.
+    shape[arg] = paramSchema(name, name in paramDefaults ? { ...spec, required: false, default: paramDefaults[name] } : spec);
   }
 
   const cloud = isCloudAvailable(tool);
@@ -656,7 +690,8 @@ export function buildMcpTool(tool: CatalogTool): McpToolDef {
 
   const description = [
     tool.description,
-    whereText(tool),
+    TOOL_HINTS[tool.id],
+    whereText(tool, defaultModel),
     priceText(tool) + (tool.runtimes?.local?.length ? " Free when run locally." : ""),
     outputsText(tool),
   ]
@@ -669,6 +704,7 @@ export function buildMcpTool(tool: CatalogTool): McpToolDef {
     description,
     inputSchema: z.object(shape).strict(),
     paramArgs,
+    paramDefaults,
     tool,
   };
 }
@@ -813,6 +849,9 @@ export async function runEditTool(
   const tool = def.tool;
   try {
     const { control, inputs, params: rawParams } = splitArgs(def, args);
+    for (const [k, v] of Object.entries(def.paramDefaults ?? {})) {
+      if (rawParams[k] === undefined || rawParams[k] === null || rawParams[k] === "") rawParams[k] = v;
+    }
     const params = validateParams(tool, rawParams);
     const prepared = await prepareInputs(tool, inputs, ctx.cwd);
     const runOn: RunOn = control.run_on ?? "auto";
@@ -1040,7 +1079,14 @@ export function listToolsSummary(catalog: Catalog, probe: DesktopProbe, kind?: s
           Object.entries(t.inputs).map(([n, s]) => [n, `${s.type}${s.multiple ? "[]" : ""}${s.required === false ? " (optional)" : ""}`]),
         ),
         params: Object.keys(t.params),
-        needs_model: gen || undefined,
+        needs_model: gen && !defaultModelFor(t) ? true : undefined,
+        default_model: defaultModelFor(t),
+        model_hint:
+          t.id === "instruct-edit"
+            ? `an instruction-edit model: list_models entries with edit_model: true (engine '${EDIT_MODEL_ENGINE}')`
+            : gen
+              ? "a model_code from list_models that accepts an image input"
+              : undefined,
       });
     });
   return {

@@ -704,6 +704,170 @@ test("listToolsSummary: prices, cloud/local availability, Desktop reachability",
 });
 
 // ---------------------------------------------------------------------------
+// edit_with_instructions (instruct-edit): references, default model, pricing
+// ---------------------------------------------------------------------------
+
+const editTool = catalog.find((t) => t.id === "instruct-edit");
+const editDef = (env = {}) => buildMcpTool(editTool, env);
+const DATA_PNG = "data:image/png;base64," + PNG.toString("base64");
+
+test("edit_with_instructions: registered with agent guidance; model optional, instruction required", () => {
+  assert.equal(editTool.mcp_name, "edit_with_instructions");
+  const def = editDef();
+  assert.equal(def.name, "edit_with_instructions");
+  assert.match(def.description, /replace the background with a beach at sunset/);
+  assert.match(def.description, /remove the person on the left/);
+  assert.match(def.description, /change the text on the sign to OPEN/);
+  assert.match(def.description, /image 2 and image 3/);
+  assert.match(def.description, /defaults to 'qwen-image-edit-2511'/);
+  assert.match(def.description, /model's generation price/);
+  assert.deepEqual(def.paramDefaults, { model: "qwen-image-edit-2511" });
+  const s = def.inputSchema;
+  assert.ok(s.safeParse({ image: "a.png", instruction: "make it night" }).success);
+  assert.ok(s.safeParse({ image: "a.png", instruction: "x", references: ["b.png", "https://c/d.png"] }).success);
+  assert.equal(s.safeParse({ image: "a.png" }).success, false); // instruction required
+  assert.equal(s.safeParse({ image: "a.png", instruction: "x", references: ["1", "2", "3"] }).success, false);
+  assert.equal(s.safeParse({ image: "a.png", instruction: "x", references: [] }).success, false);
+  assert.equal(s.safeParse({ image: "a.png", instruction: "x", references: "b.png" }).success, false);
+  assert.match(s.shape.model.description, /Default: 'qwen-image-edit-2511'/);
+
+  // IMFERENCE_DEFAULT_EDIT_MODEL overrides; other generation tools keep model required.
+  assert.deepEqual(editDef({ IMFERENCE_DEFAULT_EDIT_MODEL: " my-edit " }).paramDefaults, { model: "my-edit" });
+  assert.deepEqual(buildMcpTool(catalog.find((t) => t.id === "inpaint"), { IMFERENCE_DEFAULT_EDIT_MODEL: "x" }).paramDefaults, {});
+});
+
+test("edit_with_instructions: list_tools shows the default model and which models fit", () => {
+  const row = listToolsSummary({ source: "bundled", tools: catalog }, { reachable: false, reason: "x" })
+    .tools.find((t) => t.tool === "edit_with_instructions");
+  assert.equal(row.default_model, "qwen-image-edit-2511");
+  assert.equal(row.needs_model, undefined);
+  assert.match(row.model_hint, /edit_model/);
+  assert.equal(row.inputs.references, "image[] (optional)");
+  const inp = listToolsSummary({ source: "bundled", tools: catalog }, { reachable: false, reason: "x" })
+    .tools.find((t) => t.tool === "inpaint");
+  assert.equal(inp.needs_model, true);
+});
+
+test("edit_with_instructions cloud: references omitted → JSON body with the default model", async () => {
+  cloudRoutes("instruct-edit", doneRow());
+  const r = await runEditTool(ctx({ apiKey: "k" }), editDef(), {
+    image: "https://x/a.png", instruction: "remove the person on the left", run_on: "cloud", include_image: false,
+  });
+  assert.equal(r.isError, undefined, r.content[0].text);
+  const body = JSON.parse(api.requests.find((q) => q.path === "/tools/instruct-edit").body);
+  assert.deepEqual(body.inputs, { image: "https://x/a.png" });
+  assert.deepEqual(body.params, { model: "qwen-image-edit-2511", instruction: "remove the person on the left" });
+});
+
+test("edit_with_instructions cloud: explicit model wins; URL/data references stay JSON lists", async () => {
+  cloudRoutes("instruct-edit", doneRow());
+  const r = await runEditTool(ctx({ apiKey: "k" }), editDef({ IMFERENCE_DEFAULT_EDIT_MODEL: "env-edit" }), {
+    image: "https://x/a.png", references: ["https://x/hat.png", DATA_PNG], instruction: "put the hat from image 2 on him",
+    model: "qwen-image-edit-2509", run_on: "cloud", include_image: false,
+  });
+  assert.equal(r.isError, undefined, r.content[0].text);
+  const body = JSON.parse(api.requests.find((q) => q.path === "/tools/instruct-edit").body);
+  assert.deepEqual(body.inputs.references, ["https://x/hat.png", DATA_PNG]);
+  assert.equal(body.params.model, "qwen-image-edit-2509");
+});
+
+test("edit_with_instructions cloud: mixed local files / URL / data URI → repeated multipart fields", async () => {
+  const src = await tempFile("edit-src.png", PNG);
+  const ref = await tempFile("edit-ref.png", Buffer.concat([PNG, Buffer.from("REF")]));
+  cloudRoutes("instruct-edit", doneRow());
+  const r = await runEditTool(ctx({ apiKey: "k" }), editDef({ IMFERENCE_DEFAULT_EDIT_MODEL: "env-edit" }), {
+    image: src, references: [ref, "https://x/b.png"], instruction: "change the text on the sign to OPEN",
+    run_on: "cloud", include_image: false,
+  });
+  assert.equal(r.isError, undefined, r.content[0].text);
+  const post = api.requests.find((q) => q.path === "/tools/instruct-edit");
+  assert.match(post.headers["content-type"], /^multipart\/form-data/);
+  assert.match(post.body, /name="image"; filename="edit-src.png"/);
+  assert.match(post.body, /name="references"; filename="edit-ref.png"\r\nContent-Type: image\/png/);
+  assert.match(post.body, /name="references"\r\n\r\nhttps:\/\/x\/b.png/);
+  assert.equal(post.body.match(/name="references"/g).length, 2);
+  // reference order is preserved: the file (image 2) before the URL (image 3)
+  assert.ok(post.body.indexOf('filename="edit-ref.png"') < post.body.indexOf("https://x/b.png"));
+  const params = JSON.parse(post.body.match(/name="params"\r\n\r\n(\{.*?\})\r\n/)[1]);
+  assert.deepEqual(params, { model: "env-edit", instruction: "change the text on the sign to OPEN" });
+
+  // data URI reference next to a local image: a text field
+  api.requests = [];
+  cloudRoutes("instruct-edit", doneRow());
+  await runEditTool(ctx({ apiKey: "k" }), editDef(), {
+    image: src, references: [DATA_PNG], instruction: "x", run_on: "cloud", include_image: false,
+  });
+  const post2 = api.requests.find((q) => q.path === "/tools/instruct-edit");
+  assert.ok(post2.body.includes(`name="references"\r\n\r\n${DATA_PNG}`));
+});
+
+test("edit_with_instructions: bad references are refused before any network call", async () => {
+  const c = ctx({ apiKey: "k" });
+  let r = await runEditTool(c, editDef(), {
+    image: "https://x/a.png", references: ["https://x/1.png", "https://x/2.png", "https://x/3.png"], instruction: "x", run_on: "cloud",
+  });
+  assert.match(errText(r), /at most 2 items/);
+  r = await runEditTool(c, editDef(), { image: "https://x/a.png", references: "https://x/1.png", instruction: "x", run_on: "cloud" });
+  assert.match(errText(r), /takes a list/);
+  r = await runEditTool(c, editDef(), { image: "https://x/a.png", references: [join(tmp, "missing.png")], instruction: "x", run_on: "cloud" });
+  assert.match(errText(r), /no such file/);
+  r = await runEditTool(c, editDef(), { image: "https://x/a.png", run_on: "cloud" });
+  assert.match(errText(r), /missing required param 'instruction'/);
+  assert.equal(api.requests.length, 0);
+});
+
+test("edit_with_instructions local: Desktop gets absolute reference paths as a list and the default model", async () => {
+  const src = await tempFile("loc-src.png", PNG);
+  const ref = await tempFile("loc-ref.png", PNG);
+  const outPath = await tempFile("loc-out.png", PNG);
+  desktopTools({ "instruct-edit": true });
+  desk.routes["POST /v1/tools/instruct-edit"] = (_req, res) =>
+    json(res, 200, { tool_id: "instruct-edit", outputs: [{ name: "image", type: "image", format: "png", path: outPath }] });
+  const c = { ...ctx({ desktop: desktopUp() }), cwd: tmp };
+  let r = await runEditTool(c, editDef(), {
+    image: "loc-src.png", references: ["loc-ref.png", "https://x/b.png"], instruction: "make it night", seed: 7,
+  });
+  assert.equal(r.isError, undefined, r.content[0].text);
+  assert.equal(resultJson(r).ran, "local");
+  assert.deepEqual(JSON.parse(desk.requests.at(-1).body), {
+    inputs: { image: src, references: [ref, "https://x/b.png"] },
+    params: { model: "qwen-image-edit-2511", instruction: "make it night", seed: 7 },
+  });
+
+  // references omitted: no key at all
+  r = await runEditTool(c, editDef(), { image: src, instruction: "x", include_image: false });
+  assert.deepEqual(JSON.parse(desk.requests.at(-1).body).inputs, { image: src });
+  assert.equal(api.requests.length, 0);
+});
+
+test("edit_with_instructions x402: priced at the (default) model's price, then paid", async () => {
+  api.routes["/api/models"] = (_req, res) =>
+    json(res, 200, { models: [
+      { model_code: "qwen-image-edit-2511", im_cost: 30, im_engine: "qwenimage-edit" },
+      { model_code: "env-edit", im_cost: 80, im_engine: "qwenimage-edit" },
+    ] });
+  api.routes["/api/formats"] = (_req, res) =>
+    json(res, 200, { formats: [{ model_code: "qwen-image-edit-2511", format_code: "std", is_default: true, credit_multiplier: 1 }] });
+
+  // Cap below the env default model's price: refused before paying.
+  let c = ctx({ walletPrivateKey: TEST_PK, x402MaxUsdPerCall: 0.05 });
+  let r = await runEditTool(c, editDef({ IMFERENCE_DEFAULT_EDIT_MODEL: "env-edit" }), {
+    image: "https://x/a.png", instruction: "x", run_on: "cloud",
+  });
+  assert.match(errText(r), /\$0\.080/);
+  assert.ok(!api.requests.some((q) => q.path.startsWith("/ondemand/tools")));
+
+  cloudRoutes("instruct-edit", doneRow(), { rail: "x402" });
+  c = ctx({ walletPrivateKey: TEST_PK });
+  r = await runEditTool(c, editDef(), { image: "https://x/a.png", instruction: "x", run_on: "cloud", include_image: false });
+  assert.equal(r.isError, undefined, r.content[0].text);
+  assert.equal(resultJson(r).rail, "x402");
+  assert.equal(c.client.sessionSpentUsd, 0.03);
+  const post = api.requests.find((q) => q.path === "/ondemand/tools/instruct-edit");
+  assert.equal(JSON.parse(post.body).params.model, "qwen-image-edit-2511");
+});
+
+// ---------------------------------------------------------------------------
 // The stdio server end to end
 // ---------------------------------------------------------------------------
 
@@ -746,7 +910,7 @@ test("stdio: tools/list exposes the editing tools (bundled catalog)", async () =
   ]);
   assert.equal(lines.find((l) => l.id === 1).result.serverInfo.version, "0.3.0");
   const names = lines.find((l) => l.id === 2).result.tools.map((t) => t.name);
-  for (const n of ["generate", "list_tools", "remove_background", "upscale", "describe_image", "inpaint"]) {
+  for (const n of ["generate", "list_tools", "remove_background", "upscale", "describe_image", "inpaint", "edit_with_instructions"]) {
     assert.ok(names.includes(n), `missing ${n}`);
   }
   const call = lines.find((l) => l.id === 3).result;
@@ -774,4 +938,26 @@ test("stdio: the live catalog from GET /api/tools drives the tool list", async (
   assert.equal(listed.catalog_source, "api");
   assert.equal(listed.desktop.reachable, false);
   assert.deepEqual(listed.tools[0].price, { credits: 7, usd: 0.007 });
+});
+
+test("stdio: list_models / get_model flag instruction-edit models", async () => {
+  api.routes["/api/models"] = (_req, res) =>
+    json(res, 200, { models: [
+      { model_code: "qwen-image-edit-2511", name: "Qwen Edit", im_cost: 30, im_engine: "qwenimage-edit", model_type: "image" },
+      { model_code: "flux", name: "Flux", im_cost: 50, im_engine: "flux", model_type: "image" },
+    ] });
+  api.routes["/api/formats"] = (_req, res) => json(res, 200, { formats: [] });
+  api.routes["/api/tools"] = (_req, res) => json(res, 404, {});
+  const lines = await rpc({ IMFERENCE_BASE_URL: api.url, IMFERENCE_TOOLS_CATALOG: "bundled" }, [
+    ...INIT,
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "list_models", arguments: {} } },
+    { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "get_model", arguments: { model: "qwen-image-edit-2511" } } },
+  ]);
+  const listed = JSON.parse(lines.find((l) => l.id === 2).result.content[0].text);
+  const edit = listed.models.find((m) => m.model_code === "qwen-image-edit-2511");
+  assert.equal(edit.edit_model, true);
+  assert.equal(edit.engine, "qwenimage-edit");
+  assert.equal(listed.models.find((m) => m.model_code === "flux").edit_model, undefined);
+  const got = JSON.parse(lines.find((l) => l.id === 3).result.content[0].text);
+  assert.equal(got.edit_model.tool, "edit_with_instructions");
 });

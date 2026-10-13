@@ -30,6 +30,7 @@ import {
   computeCreditCost,
   ImferenceClient,
   ImferenceError,
+  isEditModel,
   isVideoModel,
   MAX_LORAS,
   MAX_X402_CREDITS_TOPUP,
@@ -142,13 +143,19 @@ server.registerTool(
                 : undefined,
           img2img: m.accepts_image_input ? true : undefined,
           audio: m.has_audio ? true : undefined,
+          engine: m.im_engine || undefined,
+          // Instruction-edit models are used through edit_with_instructions.
+          edit_model: isEditModel(m) ? true : undefined,
           max_duration_s: m.duration_s_max ?? undefined,
         }))
         .filter((m) => !kind || kind === "all" || m.kind === kind);
       return ok({
         count: rows.length,
         models: rows,
-        note: "Call get_model with a model_code for full details (parameters, bounds, formats, prompting tips).",
+        note:
+          "Call get_model with a model_code for full details (parameters, bounds, formats, prompting tips). " +
+          "Models with edit_model: true edit an existing image from a plain-words instruction — use them " +
+          "with the edit_with_instructions tool (its `model`).",
       });
     } catch (e) {
       return fail(e);
@@ -183,6 +190,13 @@ server.registerTool(
         name: m.name,
         kind: isVideoModel(m) ? "video" : "image",
         family: m.family_name || undefined,
+        engine: m.im_engine || undefined,
+        edit_model: isEditModel(m)
+          ? {
+              tool: "edit_with_instructions",
+              note: "Instruction-edit model: pass it as `model` to edit_with_instructions (image + instruction).",
+            }
+          : undefined,
         cost_credits: m.im_cost,
         cost_note:
           "Base cost per generation. Multiplied by the chosen format's credit_multiplier, " +

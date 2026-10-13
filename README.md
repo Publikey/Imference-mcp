@@ -21,7 +21,7 @@ Works with any MCP client: Claude Code, Claude Desktop, Cursor, etc.
   pre-tuned weights, on SDXL, Pony, Illustrious, Z-Image, Krea 2 and Anima
   models. Opt-in: the agent only adds one when you ask for it.
 - **Editing tools, local or cloud** — remove backgrounds, upscale, caption,
-  inpaint/outpaint, crop, convert, trim and join videos. They run for free on
+  edit with plain-words instructions, inpaint/outpaint, crop, convert, trim and join videos. They run for free on
   your machine when Imference Desktop is open, in the cloud otherwise.
 - **Two payment rails** — a classic prepaid API key, or pay-per-generation in
   USDC on Base ([x402](https://www.x402.org/)) straight from a wallet, with
@@ -107,10 +107,23 @@ update. Current catalog:
 | `erase_object` | Remove the masked object and fill the hole | 4 credits |
 | `restore_faces` | Restore faces (local only) | – |
 | `crop`, `resize`, `convert`, `strip_metadata` | Basic image edits | 1 credit |
+| `edit_with_instructions` | Edit an image from a plain-words instruction ("replace the background with a beach at sunset"), with up to 2 optional reference images — instruction-edit `model`, default `qwen-image-edit-2511` | the model's price |
 | `inpaint`, `outpaint`, `vary_image` | Repaint a masked area, extend the canvas, make a variation — with a generation `model` | the model's price |
 | `video_trim`, `video_convert`, `video_concat`, `interpolate_frames` | Video edits | 2–6 credits |
 
 `list_tools` shows the live list, prices, and where each tool can run right now.
+
+**`edit_with_instructions`** takes `image`, an `instruction` and optionally
+`references` (a list of 1–2 images, referred to in the instruction as *image 2*
+and *image 3*; the edited image is image 1), plus `negative_prompt`, `steps`,
+`guidance`, `keep_size` and `seed`. `model` must be an instruction-edit model —
+`list_models` / `get_model` mark them `edit_model` (catalog engine
+`qwenimage-edit`). When `model` is omitted it defaults to
+`IMFERENCE_DEFAULT_EDIT_MODEL`, else `qwen-image-edit-2511`; this default
+applies to this tool only — `inpaint`, `outpaint` and `vary_image` still require
+`model`. Cloud price (credits or x402) is the chosen model's generation price.
+Instruction examples: "remove the person on the left", "change the text on the
+sign to OPEN", "put the hat from image 2 on the man".
 
 **Inputs** take a local file path, an https URL or a `data:` URI (a list for
 multi-file inputs like `video_concat`'s `videos`). Params are validated here
@@ -152,6 +165,8 @@ Examples — just ask your agent:
 > https://example.com/photo.png
 
 > Trim ~/clips/intro.mp4 to the first 5 seconds, in the cloud.
+
+> In ~/Pictures/shop.jpg, change the text on the sign to OPEN.
 
 Errors carry the catalog code: `invalid_input` and `too_large` (never charged),
 `unsupported_runtime`, `weights_missing`, `oom`, `timeout`, `internal`; plus
@@ -199,6 +214,7 @@ guard runs **before** any signing or network call:
 | `IMFERENCE_API_KEY` | credits rail | Bearer API key (top up at imference.com or via `buy_credits_with_wallet`) |
 | `IMFERENCE_WALLET_PRIVATE_KEY` | x402 rail | 0x-prefixed EVM private key holding USDC on Base mainnet |
 | `IMFERENCE_DEFAULT_MODEL` | – | Model used when `generate` is called without one — makes the bot's model choice deterministic |
+| `IMFERENCE_DEFAULT_EDIT_MODEL` | – | Model used when `edit_with_instructions` is called without one (default `qwen-image-edit-2511`) |
 | `IMFERENCE_X402_MAX_USD` | – | Per-payment cap in USD (default `10`) |
 | `IMFERENCE_X402_SESSION_MAX_USD` | – | Cumulative x402 cap per process (default: off) |
 | `IMFERENCE_BASE_RPC_URL` | – | Base RPC for `wallet_balance` (default `https://mainnet.base.org`) |
