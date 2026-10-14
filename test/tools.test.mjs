@@ -633,10 +633,12 @@ test("auto: a local-only tool with Desktop down fails with a hint", async () => 
 
 test("userConfigDir follows Go's os.UserConfigDir", () => {
   assert.equal(userConfigDir({ APPDATA: "C:\\Users\\u\\AppData\\Roaming" }, "win32", "C:\\Users\\u"), "C:\\Users\\u\\AppData\\Roaming");
-  assert.equal(userConfigDir({}, "darwin", "/Users/u"), "/Users/u/Library/Application Support");
+  // join() uses the host's separator, so build expectations with it (the
+  // suite also runs on Windows, where these non-native platforms never occur).
+  assert.equal(userConfigDir({}, "darwin", "/Users/u"), join("/Users/u", "Library", "Application Support"));
   assert.equal(userConfigDir({ XDG_CONFIG_HOME: "/xdg" }, "linux", "/home/u"), "/xdg");
-  assert.equal(userConfigDir({ XDG_CONFIG_HOME: "rel" }, "linux", "/home/u"), "/home/u/.config");
-  assert.equal(userConfigDir({}, "linux", "/home/u"), "/home/u/.config");
+  assert.equal(userConfigDir({ XDG_CONFIG_HOME: "rel" }, "linux", "/home/u"), join("/home/u", ".config"));
+  assert.equal(userConfigDir({}, "linux", "/home/u"), join("/home/u", ".config"));
 });
 
 test("discovery file: reachable Desktop, stale pid, missing file", async () => {
