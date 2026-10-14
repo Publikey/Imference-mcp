@@ -87,6 +87,10 @@ const json = (res, status, data) => {
 
 const catalog = bundledCatalog();
 const toolDef = (mcpName) => buildMcpTool(catalog.find((t) => t.mcp_name === mcpName));
+// Every shipped tool has a cloud runtime today; a tool without one (e.g. an
+// unverified license) is exercised through a copy with the cloud taken away.
+const localOnlyEntry = (mcpName) => ({ ...catalog.find((t) => t.mcp_name === mcpName), cloud_available: false });
+const localOnlyDef = (mcpName) => buildMcpTool(localOnlyEntry(mcpName));
 
 const desktopUp = () =>
   new DesktopClient({ env: { IMFERENCE_DESKTOP_URL: desk.url, IMFERENCE_DESKTOP_TOKEN: "dtok" } });
@@ -237,7 +241,7 @@ test("buildMcpTool: numeric enums, points, multiple inputs, generation tools, lo
   assert.equal(inp.inputSchema.safeParse({ image: "a.png", mask: "m.png" }).success, false); // model required
   assert.ok(inp.inputSchema.safeParse({ image: "a.png", mask: "m.png", model: "flux" }).success);
 
-  const rf = toolDef("restore_faces");
+  const rf = localOnlyDef("restore_faces");
   assert.match(rf.description, /Local only/);
   assert.equal(rf.inputSchema.safeParse({ image: "a.png", rail: "credits" }).success, false); // no cloud args
 });
@@ -471,7 +475,7 @@ test("cloud: no payment method → clear error, no network", async () => {
 
 test("cloud: a local-only tool is refused in the cloud", async () => {
   const png = await tempFile("face.png", PNG);
-  const r = await runEditTool(ctx({ apiKey: "k" }), toolDef("restore_faces"), { image: png, run_on: "cloud" });
+  const r = await runEditTool(ctx({ apiKey: "k" }), localOnlyDef("restore_faces"), { image: png, run_on: "cloud" });
   assert.match(errText(r), /not_available/);
   assert.equal(api.requests.length, 0);
 });
@@ -622,7 +626,7 @@ test("auto: Desktop down or tool unavailable locally → cloud, with the reason"
 
 test("auto: a local-only tool with Desktop down fails with a hint", async () => {
   const png = await tempFile("f.png", PNG);
-  const r = await runEditTool(ctx({ apiKey: "k" }), toolDef("restore_faces"), { image: png });
+  const r = await runEditTool(ctx({ apiKey: "k" }), localOnlyDef("restore_faces"), { image: png });
   assert.match(errText(r), /runs only locally/);
   assert.match(errText(r), /Start the Imference Desktop app/);
 });
@@ -692,7 +696,10 @@ test("listToolsSummary: prices, cloud/local availability, Desktop reachability",
   assert.equal(rb.cloud, true);
   assert.match(rb.local, /unknown/);
   assert.equal(down.tools.find((t) => t.tool === "inpaint").needs_model, true);
-  assert.equal(down.tools.find((t) => t.tool === "restore_faces").cloud, false);
+  assert.equal(down.tools.find((t) => t.tool === "restore_faces").cloud, true); // cloud_override
+  const lo = listToolsSummary({ source: "bundled", tools: catalog.map((t) => (t.mcp_name === "restore_faces" ? localOnlyEntry("restore_faces") : t)) },
+    { reachable: false, reason: "no file" });
+  assert.equal(lo.tools.find((t) => t.tool === "restore_faces").cloud, false);
 
   const up = listToolsSummary(
     { source: "api", tools: catalog },
