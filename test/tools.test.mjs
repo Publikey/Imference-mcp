@@ -933,7 +933,7 @@ test("stdio: the live catalog from GET /api/tools drives the tool list", async (
       version: 1,
       tools: [{ id: "remove-background", mcp_name: "remove_background", name: "Remove background", description: "Cut out.",
         category: "image", inputs: { image: { type: "image", required: true } }, params: {}, outputs: {},
-        runtimes: { local: ["cpu"], cloud_queue: "tools-light" }, price_credits: 7, cloud_available: true }],
+        runtimes: { local: ["cpu"], cloud_queue: "tools-gpu" }, price_credits: 7, cloud_available: true }],
     });
   const lines = await rpc({ IMFERENCE_BASE_URL: api.url, IMFERENCE_DESKTOP_URL: "http://127.0.0.1:1" }, [
     ...INIT,
