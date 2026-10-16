@@ -449,7 +449,7 @@
         "keep_size": {
           "type": "bool",
           "default": true,
-          "description": "Resize the result back to the input size (the model renders at about 1 MP)."
+          "description": "Resize the result back to the input size (the model works at 0.5 to 1 MP: a small input is rendered at its own size, at least 0.5 MP)."
         },
         "seed": {
           "type": "int",
