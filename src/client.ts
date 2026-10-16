@@ -403,7 +403,9 @@ export class ImferenceClient {
   }
 
   async listModels(): Promise<ImModel[]> {
-    const res = await this.getWithRetry(this.url("/api/models"), this.headers(false));
+    // type=all: the instruction-edit models too (the API leaves them out by
+    // default). An older API ignores the parameter.
+    const res = await this.getWithRetry(this.url("/api/models", { type: "all" }), this.headers(false));
     if (!res.ok) throw new ImferenceError(await this.parseError(res), res.status);
     const body = (await res.json()) as { models: ImModel[] };
     return body.models ?? [];
@@ -628,13 +630,23 @@ export function acceptsLoras(m: ImModel): boolean {
   );
 }
 
+/** Catalog model_type of the instruction-edit models (any engine). */
+export const EDIT_MODEL_TYPE = "image-edit";
+
 /**
- * True for instruction-edit models (catalog engine "qwenimage-edit", e.g.
- * qwen-image-edit-2511): they edit an input image from a plain-words
- * instruction through the edit_with_instructions tool, not generate.
+ * True for instruction-edit models (catalog model_type "image-edit", or engine
+ * "qwenimage-edit", e.g. qwen-image-edit-2511): they edit an input image from a
+ * plain-words instruction through the edit_with_instructions tool, and cannot
+ * generate from a prompt.
  */
 export function isEditModel(m: ImModel): boolean {
-  return (m.im_engine ?? "").startsWith("qwenimage-edit");
+  return m.model_type === EDIT_MODEL_TYPE || (m.im_engine ?? "").startsWith("qwenimage-edit");
+}
+
+/** What a model is for: "image-edit", "video" or "image". */
+export function modelKind(m: ImModel): "image" | "video" | "image-edit" {
+  if (isEditModel(m)) return EDIT_MODEL_TYPE;
+  return isVideoModel(m) ? "video" : "image";
 }
 
 export function isVideoModel(m: ImModel): boolean {

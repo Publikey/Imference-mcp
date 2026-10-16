@@ -959,14 +959,20 @@ test("stdio: list_models / get_model flag instruction-edit models", async () => 
   api.routes["/api/tools"] = (_req, res) => json(res, 404, {});
   const lines = await rpc({ IMFERENCE_BASE_URL: api.url, IMFERENCE_TOOLS_CATALOG: "bundled" }, [
     ...INIT,
-    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "list_models", arguments: {} } },
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "list_models", arguments: { kind: "image-edit" } } },
     { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "get_model", arguments: { model: "qwen-image-edit-2511" } } },
+    { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "list_models", arguments: {} } },
   ]);
   const listed = JSON.parse(lines.find((l) => l.id === 2).result.content[0].text);
-  const edit = listed.models.find((m) => m.model_code === "qwen-image-edit-2511");
+  assert.deepEqual(listed.models.map((m) => m.model_code), ["qwen-image-edit-2511"]);
+  const edit = listed.models[0];
   assert.equal(edit.edit_model, true);
+  assert.equal(edit.kind, "image-edit");
   assert.equal(edit.engine, "qwenimage-edit");
-  assert.equal(listed.models.find((m) => m.model_code === "flux").edit_model, undefined);
+  // The default listing is the generation models: no edit model in it.
+  const generation = JSON.parse(lines.find((l) => l.id === 4).result.content[0].text);
+  assert.deepEqual(generation.models.map((m) => m.model_code), ["flux"]);
+  assert.equal(generation.models[0].edit_model, undefined);
   const got = JSON.parse(lines.find((l) => l.id === 3).result.content[0].text);
   assert.equal(got.edit_model.tool, "edit_with_instructions");
 });

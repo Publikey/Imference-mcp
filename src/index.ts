@@ -32,6 +32,7 @@ import {
   ImferenceError,
   isEditModel,
   isVideoModel,
+  modelKind,
   MAX_LORAS,
   MAX_X402_CREDITS_TOPUP,
   MIN_X402_CREDITS_TOPUP,
@@ -113,14 +114,17 @@ server.registerTool(
     title: "List Imference models",
     description:
       "Overview of the generation models, made for PICKING the right one for the need: kind " +
-      "(image or video), style/family, one-line description, cost in credits (1 credit = " +
+      "(image or video; kind image-edit lists the instruction-edit models of edit_with_instructions instead), style/family, one-line description, cost in credits (1 credit = " +
       "$0.001), and capabilities (img2img, audio). Once a model is chosen, call get_model for " +
       "its full description, recommended prompting and exact parameter bounds before generating.",
     inputSchema: {
       kind: z
-        .enum(["image", "video", "all"])
+        .enum(["image", "video", "image-edit", "all"])
         .optional()
-        .describe("Filter by media kind (default: all)"),
+        .describe(
+          "Filter by kind (default: image + video, the generation models). image-edit = the " +
+            "instruction-edit models for edit_with_instructions; all = everything.",
+        ),
     },
   },
   async ({ kind }) => {
@@ -130,7 +134,7 @@ server.registerTool(
         .map((m) => ({
           model_code: m.model_code,
           name: m.name,
-          kind: isVideoModel(m) ? "video" : "image",
+          kind: modelKind(m),
           cost_credits: m.im_cost,
           description: m.short_description || m.medium_description || m.description,
           family: m.family_name || undefined,
@@ -148,14 +152,15 @@ server.registerTool(
           edit_model: isEditModel(m) ? true : undefined,
           max_duration_s: m.duration_s_max ?? undefined,
         }))
-        .filter((m) => !kind || kind === "all" || m.kind === kind);
+        .filter((m) => (kind ? kind === "all" || m.kind === kind : m.kind !== "image-edit"));
       return ok({
         count: rows.length,
         models: rows,
         note:
           "Call get_model with a model_code for full details (parameters, bounds, formats, prompting tips). " +
-          "Models with edit_model: true edit an existing image from a plain-words instruction — use them " +
-          "with the edit_with_instructions tool (its `model`).",
+          "Instruction-edit models (kind image-edit, list them with kind: \"image-edit\") edit an existing " +
+          "image from a plain-words instruction: use them with the edit_with_instructions tool (its `model`), " +
+          "never with generate.",
       });
     } catch (e) {
       return fail(e);
@@ -188,7 +193,7 @@ server.registerTool(
       return ok({
         model_code: m.model_code,
         name: m.name,
-        kind: isVideoModel(m) ? "video" : "image",
+        kind: modelKind(m),
         family: m.family_name || undefined,
         engine: m.im_engine || undefined,
         edit_model: isEditModel(m)

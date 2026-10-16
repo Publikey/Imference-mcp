@@ -72,7 +72,7 @@ recommended quality tags, pick a banner format, generate, and show the result.
 
 | Tool | Purpose | Needs |
 |---|---|---|
-| `list_models` | Model overview for picking: kind, style family, prompt style, cost, capabilities | – |
+| `list_models` | Model overview for picking: kind, style family, prompt style, cost, capabilities (`kind: "image-edit"` for the instruction-edit models) | – |
 | `get_model` | One model in full: description, prompting recommendations, exact parameters & bounds, formats & price multipliers | – |
 | `list_formats` | Predefined output formats per model (`square`, `portrait`, `landscape-wide`, …) | – |
 | `list_loras` | Curated LoRAs: category, compatible families, weight bounds, trigger words | – |
@@ -117,8 +117,9 @@ update. Current catalog:
 `references` (a list of 1–2 images, referred to in the instruction as *image 2*
 and *image 3*; the edited image is image 1), plus `negative_prompt`, `steps`,
 `guidance`, `keep_size` and `seed`. `model` must be an instruction-edit model —
-`list_models` / `get_model` mark them `edit_model` (catalog engine
-`qwenimage-edit`). When `model` is omitted it defaults to
+`list_models` with `kind: "image-edit"` lists them (catalog `model_type`
+`image-edit`, or engine `qwenimage-edit`; the default listing leaves them out),
+and `get_model` marks them `edit_model`. When `model` is omitted it defaults to
 `IMFERENCE_DEFAULT_EDIT_MODEL`, else `qwen-image-edit-2511`; this default
 applies to this tool only — `inpaint`, `outpaint` and `vary_image` still require
 `model`. Cloud price (credits or x402) is the chosen model's generation price.

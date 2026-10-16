@@ -13,6 +13,8 @@ import {
   resolveFormat,
   usdToAtomic,
   isVideoModel,
+  isEditModel,
+  modelKind,
   acceptsLoras,
 } from "../dist/client.js";
 
@@ -67,6 +69,25 @@ test("listModels parses the models envelope", async () => {
   const models = await makeClient().listModels();
   assert.equal(models.length, 1);
   assert.equal(models[0].model_code, "flux");
+});
+
+test("listModels asks for every kind (edit models are left out by default)", async () => {
+  let query;
+  routes["/api/models"] = (req, res) => {
+    query = new URL(req.url, "http://x").searchParams.get("type");
+    json(res, 200, { models: [] });
+  };
+  await makeClient().listModels();
+  assert.equal(query, "all");
+});
+
+test("edit models: model_type image-edit or the qwenimage-edit engine", () => {
+  assert.equal(isEditModel({ model_type: "image-edit", im_engine: "future-edit" }), true);
+  assert.equal(isEditModel({ model_type: "image", im_engine: "qwenimage-edit" }), true);
+  assert.equal(isEditModel({ model_type: "image", im_engine: "zimage" }), false);
+  assert.equal(modelKind({ model_type: "image-edit" }), "image-edit");
+  assert.equal(modelKind({ model_type: "video" }), "video");
+  assert.equal(modelKind({ model_type: "image" }), "image");
 });
 
 test("GET retries on 5xx then succeeds", async () => {
