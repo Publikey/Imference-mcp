@@ -4,7 +4,7 @@ MCP server for [Imference](https://imference.com) — AI image & video generatio
 for agents. 45+ image models and 3 video models behind four tools an LLM can
 drive end-to-end: browse the catalog, learn how to prompt each model, generate,
 and see the result. Plus a set of editing tools (remove background, upscale,
-describe, inpaint, crop, video trim…) that run in the cloud or locally, for
+describe, outpaint, crop, video trim…) that run in the cloud or locally, for
 free, in [Imference Desktop](#editing-tools).
 
 Works with any MCP client: Claude Code, Claude Desktop, Cursor, etc.
@@ -21,7 +21,7 @@ Works with any MCP client: Claude Code, Claude Desktop, Cursor, etc.
   pre-tuned weights, on SDXL, Pony, Illustrious, Z-Image, Krea 2 and Anima
   models. Opt-in: the agent only adds one when you ask for it.
 - **Editing tools, local or cloud** — remove backgrounds, upscale, caption,
-  edit with plain-words instructions, inpaint/outpaint, crop, convert, trim and join videos. They run for free on
+  edit with plain-words instructions, outpaint, crop, convert, trim and join videos. They run for free on
   your machine when Imference Desktop is open, in the cloud otherwise.
 - **Two payment rails** — a classic prepaid API key, or pay-per-generation in
   USDC on Base ([x402](https://www.x402.org/)) straight from a wallet, with
@@ -108,7 +108,7 @@ update. Current catalog:
 | `restore_faces` | Restore faces (local only) | – |
 | `crop`, `resize`, `convert`, `strip_metadata` | Basic image edits | 1 credit |
 | `edit_with_instructions` | Edit an image from a plain-words instruction ("replace the background with a beach at sunset"), with up to 2 optional reference images — instruction-edit `model`, default `qwen-image-edit-2511` | the model's price |
-| `inpaint`, `outpaint`, `vary_image` | Repaint a masked area, extend the canvas, make a variation — with a generation `model` | the model's price |
+| `outpaint`, `vary_image` | Extend the canvas, make a variation — with a generation `model` | the model's price |
 | `video_trim`, `video_convert`, `video_concat`, `interpolate_frames` | Video edits | 2–6 credits |
 
 `list_tools` shows the live list, prices, and where each tool can run right now.
@@ -121,7 +121,7 @@ and *image 3*; the edited image is image 1), plus `negative_prompt`, `steps`,
 `image-edit`, or engine `qwenimage-edit`; the default listing leaves them out),
 and `get_model` marks them `edit_model`. When `model` is omitted it defaults to
 `IMFERENCE_DEFAULT_EDIT_MODEL`, else `qwen-image-edit-2511`; this default
-applies to this tool only — `inpaint`, `outpaint` and `vary_image` still require
+applies to this tool only — `outpaint` and `vary_image` still require
 `model`. Cloud price (credits or x402) is the chosen model's generation price.
 Instruction examples: "remove the person on the left", "change the text on the
 sign to OPEN", "put the hat from image 2 on the man".

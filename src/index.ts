@@ -769,7 +769,7 @@ function registerEditingTools(catalog: Catalog): void {
     {
       title: "List editing tools",
       description:
-        "List the image/video editing tools (remove background, upscale, describe, inpaint, " +
+        "List the image/video editing tools (remove background, upscale, describe, outpaint, " +
         "crop, convert, video trim/join...) with their price per cloud run (1 credit = $0.001), " +
         "whether each runs in the cloud and/or locally in Imference Desktop (free), and whether " +
         "Desktop is running right now. Each tool is also its own MCP tool (the `tool` name).",

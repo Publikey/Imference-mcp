@@ -149,9 +149,10 @@ const doneRow = (extra = {}) => ({
 
 test("bundled catalog loads every available tool with its MCP name", () => {
   const names = catalog.map((t) => t.mcp_name);
-  for (const n of ["remove_background", "upscale", "describe_image", "inpaint", "select_object", "video_concat"]) {
+  for (const n of ["remove_background", "upscale", "describe_image", "outpaint", "select_object", "video_concat"]) {
     assert.ok(names.includes(n), `missing ${n}`);
   }
+  assert.ok(!names.includes("inpaint"), "inpaint is disabled in the engine catalog");
   assert.equal(new Set(names).size, names.length);
 });
 
@@ -236,10 +237,10 @@ test("buildMcpTool: numeric enums, points, multiple inputs, generation tools, lo
   assert.ok(cat.safeParse({ videos: ["a.mp4", "b.mp4"] }).success);
   assert.equal(cat.safeParse({ videos: ["a.mp4"] }).success, false); // min_items 2
 
-  const inp = toolDef("inpaint");
-  assert.match(inp.description, /model's generation price/);
-  assert.equal(inp.inputSchema.safeParse({ image: "a.png", mask: "m.png" }).success, false); // model required
-  assert.ok(inp.inputSchema.safeParse({ image: "a.png", mask: "m.png", model: "flux" }).success);
+  const op = toolDef("outpaint");
+  assert.match(op.description, /model's generation price/);
+  assert.equal(op.inputSchema.safeParse({ image: "a.png", left: 64 }).success, false); // model required
+  assert.ok(op.inputSchema.safeParse({ image: "a.png", left: 64, model: "flux" }).success);
 
   const rf = localOnlyDef("restore_faces");
   assert.match(rf.description, /Local only/);
@@ -695,7 +696,7 @@ test("listToolsSummary: prices, cloud/local availability, Desktop reachability",
   assert.deepEqual(rb.price, { credits: 3, usd: 0.003 });
   assert.equal(rb.cloud, true);
   assert.match(rb.local, /unknown/);
-  assert.equal(down.tools.find((t) => t.tool === "inpaint").needs_model, true);
+  assert.equal(down.tools.find((t) => t.tool === "outpaint").needs_model, true);
   assert.equal(down.tools.find((t) => t.tool === "restore_faces").cloud, true); // cloud_override
   const lo = listToolsSummary({ source: "bundled", tools: catalog.map((t) => (t.mcp_name === "restore_faces" ? localOnlyEntry("restore_faces") : t)) },
     { reachable: false, reason: "no file" });
@@ -742,7 +743,7 @@ test("edit_with_instructions: registered with agent guidance; model optional, in
 
   // IMFERENCE_DEFAULT_EDIT_MODEL overrides; other generation tools keep model required.
   assert.deepEqual(editDef({ IMFERENCE_DEFAULT_EDIT_MODEL: " my-edit " }).paramDefaults, { model: "my-edit" });
-  assert.deepEqual(buildMcpTool(catalog.find((t) => t.id === "inpaint"), { IMFERENCE_DEFAULT_EDIT_MODEL: "x" }).paramDefaults, {});
+  assert.deepEqual(buildMcpTool(catalog.find((t) => t.id === "outpaint"), { IMFERENCE_DEFAULT_EDIT_MODEL: "x" }).paramDefaults, {});
 });
 
 test("edit_with_instructions: list_tools shows the default model and which models fit", () => {
@@ -753,7 +754,7 @@ test("edit_with_instructions: list_tools shows the default model and which model
   assert.match(row.model_hint, /edit_model/);
   assert.equal(row.inputs.references, "image[] (optional)");
   const inp = listToolsSummary({ source: "bundled", tools: catalog }, { reachable: false, reason: "x" })
-    .tools.find((t) => t.tool === "inpaint");
+    .tools.find((t) => t.tool === "outpaint");
   assert.equal(inp.needs_model, true);
 });
 
@@ -919,7 +920,7 @@ test("stdio: tools/list exposes the editing tools (bundled catalog)", async () =
   ]);
   assert.equal(lines.find((l) => l.id === 1).result.serverInfo.version, "0.3.0");
   const names = lines.find((l) => l.id === 2).result.tools.map((t) => t.name);
-  for (const n of ["generate", "list_tools", "remove_background", "upscale", "describe_image", "inpaint", "edit_with_instructions"]) {
+  for (const n of ["generate", "list_tools", "remove_background", "upscale", "describe_image", "outpaint", "edit_with_instructions"]) {
     assert.ok(names.includes(n), `missing ${n}`);
   }
   const call = lines.find((l) => l.id === 3).result;

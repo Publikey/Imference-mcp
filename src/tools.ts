@@ -1,6 +1,6 @@
 /**
  * Editing tools: one MCP tool per catalog entry (remove_background, upscale,
- * describe_image, inpaint, ...), each runnable locally in Imference Desktop
+ * describe_image, outpaint, ...), each runnable locally in Imference Desktop
  * (free, files stay on the machine) or in the cloud (credits or x402).
  *
  * Everything here is transport-agnostic so it can be unit tested: index.ts
@@ -476,7 +476,7 @@ const TOOL_HINTS: Record<string, string> = {
     "\"remove the person on the left\", \"change the text on the sign to OPEN\", \"make it a watercolor painting\". " +
     "Everything not mentioned is kept. Optional `references` (up to 2 images) are referred to in the " +
     "instruction as image 2 and image 3 (the edited `image` is image 1), e.g. \"put the hat from image 2 on " +
-    "the man\". For a masked region use inpaint; for a new image from scratch use generate.",
+    "the man\". To remove an object use erase_object; for a new image from scratch use generate.",
 };
 
 export interface McpToolDef {
