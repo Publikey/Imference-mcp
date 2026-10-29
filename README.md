@@ -180,9 +180,11 @@ Errors carry the catalog code: `invalid_input` and `too_large` (never charged),
 - **x402** — pay-per-request in USDC on Base mainnet, no account needed. The
   server answers with an HTTP 402 challenge priced at the request's catalog
   cost; this MCP server signs an EIP-3009 `transferWithAuthorization` with the
-  configured wallet ([x402-fetch](https://www.npmjs.com/package/x402-fetch))
-  and retries with the `X-PAYMENT` header. Gasless for the payer — only USDC
-  needed, no ETH. Set `IMFERENCE_WALLET_PRIVATE_KEY`.
+  configured wallet ([@x402/fetch](https://www.npmjs.com/package/@x402/fetch),
+  x402 v2) and retries with the `PAYMENT-SIGNATURE` header. Gasless for the
+  payer — only USDC needed, no ETH. Set `IMFERENCE_WALLET_PRIVATE_KEY`.
+  It only ever signs exact USDC on Base mainnet: an offer on another network
+  or token, or above the authorized price, is refused, not paid.
 
 `generate` picks the rail automatically (credits if an API key is set, else
 x402) — override per call with the `rail` argument. The wallet only ever signs

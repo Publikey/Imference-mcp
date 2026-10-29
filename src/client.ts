@@ -10,7 +10,7 @@
  *   GET  /api/tools           public editing-tool catalog
  *   POST /tools/{tool_id}     run an editing tool (JSON or multipart)
  *
- * x402 rail (USDC on Base, signed with a wallet private key):
+ * x402 rail (USDC on Base, signed with a wallet private key, x402 v2):
  *   POST /ondemand/generate      pay-per-generation at the model's catalog price
  *   POST /ondemand/credits/add   prepay credits onto an API key (min 100, max 1M)
  *   POST /ondemand/tools/{id}    pay-per-run editing tool (price = tool credits × $0.001)
@@ -20,7 +20,9 @@
  * 200 = done).
  */
 
-import { createSigner, decodeXPaymentResponse, wrapFetchWithPayment } from "x402-fetch";
+import { decodePaymentResponseHeader, wrapFetchWithPayment, x402Client } from "@x402/fetch";
+import type { PaymentRequirements } from "@x402/fetch";
+import { ExactEvmScheme } from "@x402/evm";
 import { privateKeyToAccount } from "viem/accounts";
 import { createPublicClient, erc20Abi, formatUnits, http } from "viem";
 import { base } from "viem/chains";
@@ -28,6 +30,9 @@ import type { Hex } from "viem";
 
 /** USDC contract on Base mainnet. */
 const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
+
+/** Base mainnet, CAIP-2: the only network this server signs payments on. */
+const BASE_NETWORK = "eip155:8453" as const;
 
 export interface ImferenceConfig {
   baseUrl: string;
@@ -206,7 +211,7 @@ export type StatusResult =
   | { state: "failed"; error: string; code?: string }
   | { state: "done"; media: MediaRow };
 
-/** Settlement info decoded from the X-PAYMENT-RESPONSE header after an x402 payment. */
+/** Settlement info decoded from the PAYMENT-RESPONSE header after an x402 payment. */
 export interface PaymentReceipt {
   success?: boolean;
   transaction?: string;
@@ -306,27 +311,56 @@ export class ImferenceClient {
   }
 
   /**
-   * fetch wrapped with the x402 payment flow: on a 402 challenge, signs an
-   * EIP-3009 USDC transfer (Base mainnet) with the configured wallet and
-   * retries with the X-PAYMENT header. maxAtomic caps what the wallet will
-   * sign for, in atomic USDC units (6 decimals).
+   * fetch wrapped with the x402 v2 payment flow: on a 402 challenge, signs an
+   * EIP-3009 USDC transfer with the configured wallet and retries with the
+   * PAYMENT-SIGNATURE header. Only exact USDC on Base mainnet is ever signed,
+   * and never above maxAtomic (atomic USDC units, 6 decimals): an offer
+   * outside that is refused, not paid. v2 only: a server that offers v2 is
+   * never paid in v1.
    */
-  private async paymentFetch(maxAtomic: bigint): Promise<typeof fetch> {
+  private paymentFetch(maxAtomic: bigint): typeof fetch {
     if (!this.config.walletPrivateKey) {
       throw new ImferenceError(
         "IMFERENCE_WALLET_PRIVATE_KEY is not set. The x402 rail needs an EVM wallet " +
           "holding USDC on Base to sign payments.",
       );
     }
-    const signer = await createSigner("base", this.config.walletPrivateKey as Hex);
-    return wrapFetchWithPayment(fetch, signer, maxAtomic) as typeof fetch;
+    const account = privateKeyToAccount(this.config.walletPrivateKey as Hex);
+    const client = x402Client.fromConfig({
+      schemes: [{ network: BASE_NETWORK, client: new ExactEvmScheme(account) }],
+      policies: [(_version, reqs) => reqs.filter((r) => payableOffer(r, maxAtomic))],
+      // The SDK's default cap is $1 per payment; ours is the price the spend
+      // guards just authorized (a credits top-up goes up to $1,000).
+      spendControls: { maxAmountPerPayment: atomicToUsd(maxAtomic) },
+    });
+    const pay = wrapFetchWithPayment(fetch, client);
+    return (async (input: RequestInfo | URL, init?: RequestInit) => {
+      try {
+        return await pay(input, init);
+      } catch (err) {
+        if (err instanceof ImferenceError) throw err;
+        const why = err instanceof Error ? err.message : String(err);
+        // The SDK refuses to build a payment when no offer passes the policy
+        // and the spend cap: say so in terms of this server's rules.
+        if (why.startsWith("Failed to create payment payload")) {
+          throw new ImferenceError(
+            "Payment not signed: the API asked for a payment this server does not make " +
+              `(it only pays exact USDC on Base mainnet, at most $${atomicToUsd(maxAtomic).toFixed(3)} ` +
+              `for this call). ${why}`,
+            402,
+          );
+        }
+        throw new ImferenceError(`x402 payment request failed: ${why}`);
+      }
+    }) as typeof fetch;
   }
 
   private receipt(res: Response): PaymentReceipt | undefined {
-    const header = res.headers.get("x-payment-response");
+    // PAYMENT-RESPONSE in v2; X-PAYMENT-RESPONSE from a v1-era server.
+    const header = res.headers.get("payment-response") ?? res.headers.get("x-payment-response");
     if (!header) return undefined;
     try {
-      return decodeXPaymentResponse(header) as PaymentReceipt;
+      return decodePaymentResponseHeader(header) as PaymentReceipt;
     } catch {
       return undefined;
     }
@@ -475,7 +509,7 @@ export class ImferenceClient {
   ): Promise<{ request_id: string; kind: string; payment?: PaymentReceipt }> {
     const priceAtomic = creditsToAtomicUsdc(priceCredits);
     this.authorizeSpend(priceAtomic, `generation with model '${payload.model}'`);
-    const payFetch = await this.paymentFetch(priceAtomic + 10_000n);
+    const payFetch = this.paymentFetch(priceAtomic + 10_000n);
     const res = await payFetch(this.url("/ondemand/generate"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -497,7 +531,7 @@ export class ImferenceClient {
   ): Promise<{ api_key: string; credits_added: number; payment?: PaymentReceipt }> {
     const priceAtomic = creditsToAtomicUsdc(credits);
     this.authorizeSpend(priceAtomic, `credits top-up of ${credits} credits`);
-    const payFetch = await this.paymentFetch(priceAtomic + 10_000n);
+    const payFetch = this.paymentFetch(priceAtomic + 10_000n);
     const res = await payFetch(this.url("/ondemand/credits/add"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -560,7 +594,7 @@ export class ImferenceClient {
   ): Promise<ToolSubmitResponse & { payment?: PaymentReceipt }> {
     const priceAtomic = creditsToAtomicUsdc(priceCredits);
     this.authorizeSpend(priceAtomic, `tool '${toolId}'`);
-    const payFetch = await this.paymentFetch(priceAtomic + 10_000n);
+    const payFetch = this.paymentFetch(priceAtomic + 10_000n);
     const res = await payFetch(
       this.url(`/ondemand/tools/${encodeURIComponent(toolId)}`),
       this.toolInit(body, {}),
@@ -616,6 +650,26 @@ export class ImferenceClient {
     const body = (await res.json()) as { data: MediaRow[] };
     return body.data ?? [];
   }
+}
+
+/**
+ * True for an offer this server may sign: exact USDC on Base mainnet, payable
+ * to the API, at no more than maxAtomic.
+ */
+export function payableOffer(r: PaymentRequirements, maxAtomic: bigint): boolean {
+  let amount: bigint;
+  try {
+    amount = BigInt(r.amount);
+  } catch {
+    return false;
+  }
+  return (
+    r.scheme === "exact" &&
+    r.network === BASE_NETWORK &&
+    r.asset.toLowerCase() === USDC_BASE.toLowerCase() &&
+    amount > 0n &&
+    amount <= maxAtomic
+  );
 }
 
 /**
