@@ -80,7 +80,7 @@ const DEFAULT_MODEL = process.env.IMFERENCE_DEFAULT_MODEL;
 
 const server = new McpServer({
   name: "imference",
-  version: "0.3.1",
+  version: "0.4.0",
 });
 
 function mediaSummary(m: MediaRow) {

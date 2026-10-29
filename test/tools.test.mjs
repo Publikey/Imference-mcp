@@ -918,7 +918,7 @@ test("stdio: tools/list exposes the editing tools (bundled catalog)", async () =
     { jsonrpc: "2.0", id: 2, method: "tools/list" },
     { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "upscale", arguments: { image: "https://x/a.png", scale: 3 } } },
   ]);
-  assert.equal(lines.find((l) => l.id === 1).result.serverInfo.version, "0.3.1");
+  assert.equal(lines.find((l) => l.id === 1).result.serverInfo.version, "0.4.0");
   const names = lines.find((l) => l.id === 2).result.tools.map((t) => t.name);
   for (const n of ["generate", "list_tools", "remove_background", "upscale", "describe_image", "outpaint", "edit_with_instructions"]) {
     assert.ok(names.includes(n), `missing ${n}`);
