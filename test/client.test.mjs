@@ -282,3 +282,33 @@ test("wallet address derives from the private key, key never required for reads"
 test("malformed private key is rejected at construction", () => {
   assert.throws(() => makeClient({ walletPrivateKey: "0x123" }), /64-hex-char/);
 });
+
+test("history: credits rail sends the API key and the paging query", async () => {
+  routes["/history"] = (_req, res) =>
+    json(res, 200, { data: [{ request_id: "r1", status: "done", outputs: [] }], next_cursor: "7", retention_hours: 24 });
+  const c = new ImferenceClient({ baseUrl, apiKey: "k" });
+  const page = await c.history("credits", { limit: 5, cursor: "9" });
+  assert.equal(page.data[0].request_id, "r1");
+  assert.equal(page.next_cursor, "7");
+  const r = requests.at(-1);
+  assert.equal(r.headers.authorization, "Bearer k");
+  assert.equal(r.headers["x-wallet-auth"], undefined);
+});
+
+test("history: x402 rail signs a Sign-In with Ethereum message with the wallet", async () => {
+  routes["/history"] = (_req, res) => json(res, 200, { data: [], retention_hours: 24 });
+  const c = new ImferenceClient({ baseUrl, walletPrivateKey: TEST_PK });
+  await c.history("x402");
+  const r = requests.at(-1);
+  assert.equal(r.headers.authorization, undefined);
+  const { message, signature } = JSON.parse(Buffer.from(r.headers["x-wallet-auth"], "base64").toString());
+  const lines = message.split("\n");
+  assert.equal(lines[0], `${new URL(baseUrl).host} wants you to sign in with your Ethereum account:`);
+  assert.equal(lines[1], c.walletAddress);
+  assert.equal(lines[3], "Read my Imference call history.");
+  const { verifyMessage } = await import("viem");
+  assert.ok(await verifyMessage({ address: c.walletAddress, message, signature }));
+  const issued = Date.parse(message.match(/Issued At: (.*)/)[1]);
+  const exp = Date.parse(message.match(/Expiration Time: (.*)/)[1]);
+  assert.ok(exp - issued <= 24 * 3600 * 1000 && exp > issued);
+});

@@ -81,6 +81,7 @@ recommended quality tags, pick a banner format, generate, and show the result.
 | `download_media` | Save an image or video to a local file | – |
 | `get_balance` | Remaining credits of the API key | API key |
 | `list_media` | Previously generated media, newest first | API key |
+| `list_history` | Past calls (status, rail, credits, outputs), newest first; output URLs for 24 h, to re-download with `download_media`. Prompts and settings are never stored | API key or wallet (signed in, no payment) |
 | `buy_credits_with_wallet` | Top up (or mint) an API key with one USDC payment | wallet |
 | `wallet_balance` | USDC balance of the configured wallet (read-only) | wallet |
 | `payment_config` | Which rails are configured, caps, session spend | – |
