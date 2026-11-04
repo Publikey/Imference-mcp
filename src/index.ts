@@ -756,6 +756,37 @@ server.registerTool(
   },
 );
 
+server.registerTool(
+  "list_history",
+  {
+    title: "List call history",
+    description:
+      "List past calls (generations and editing tools), newest first, for the API key (credits " +
+      "rail) or the configured wallet (x402 rail, signed in automatically, no payment). Each call " +
+      "has its status, rail, kind, credits charged and its outputs. Prompts and settings are never " +
+      "stored, so they are not listed. Output URLs are given for 24 h: pass one to download_media " +
+      "to fetch the file again; after that the call shows expired: true and no URL.",
+    inputSchema: {
+      rail: z
+        .enum(["credits", "x402"])
+        .optional()
+        .describe("Whose calls: the API key's (credits) or the wallet's (x402). Default: credits when an API key is set, else x402"),
+      limit: z.number().int().positive().max(200).optional().describe("Max calls (default 25)"),
+      cursor: z.string().optional().describe("next_cursor of the previous page"),
+      since: z.string().optional().describe("Only calls at or after this RFC 3339 time"),
+    },
+  },
+  async ({ rail, limit, cursor, since }) => {
+    try {
+      const which = rail ?? (client.hasApiKey ? "credits" : "x402");
+      const page = await client.history(which, { limit: limit ?? 25, cursor, since });
+      return ok({ rail: which, ...page });
+    } catch (e) {
+      return fail(e);
+    }
+  },
+);
+
 // ---------------------------------------------------------------------------
 // Editing tools (one MCP tool per catalog entry) + list_tools
 // ---------------------------------------------------------------------------
