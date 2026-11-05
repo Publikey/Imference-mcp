@@ -3,7 +3,8 @@
  * imference-mcp — MCP server (stdio) wrapping the Imference generation API.
  *
  * Environment:
- *   IMFERENCE_API_KEY              Bearer key for the credits rail
+ *   IMFERENCE_API_KEY              Bearer key for the credits rail (unset: the key of the
+ *                                  Imference Desktop account, when Desktop lets agents use it)
  *   IMFERENCE_WALLET_PRIVATE_KEY   EVM private key (USDC on Base) for the x402 rail
  *   IMFERENCE_X402_MAX_USD         hard cap per x402 payment (default 10; enforced
  *                                  server-side, whatever the tool call asks for)
@@ -44,6 +45,8 @@ import { loadCatalog, type Catalog } from "./catalog.js";
 import { DesktopClient } from "./desktop.js";
 import { VERSION } from "./version.js";
 import { isRemoteUrl, localAvailability, planGenerate, runLocalGenerate } from "./generate.js";
+import { checkLocal, isLocalRequestId, LOCAL_WAIT_DEFAULT_S } from "./local-jobs.js";
+import { reportCloudEnd, reportCloudStart } from "./agent-report.js";
 import { fail, ok, previewFromUrl, type ContentBlock } from "./results.js";
 import {
   buildMcpTool,
@@ -85,6 +88,58 @@ const server = new McpServer({
   version: VERSION,
 });
 
+// ---------------------------------------------------------------------------
+// The credits key: IMFERENCE_API_KEY, else the Imference Desktop account's
+// key — asked from Desktop before each tool call (cached a few seconds), so a
+// key added in Desktop, or the permission turned off, applies at once.
+// ---------------------------------------------------------------------------
+
+const ENV_API_KEY = process.env.IMFERENCE_API_KEY || undefined;
+let keySource: "env" | "desktop" | "none" = ENV_API_KEY ? "env" : "none";
+let keySyncedAt = 0;
+let keySync: Promise<void> | undefined;
+const KEY_SYNC_MS = 5000;
+
+/** Parallel tool calls share one lookup (and all wait for it). */
+function syncDesktopKey(): Promise<void> {
+  if (ENV_API_KEY) return Promise.resolve();
+  if (keySync && Date.now() - keySyncedAt < KEY_SYNC_MS) return keySync;
+  keySyncedAt = Date.now();
+  keySync = lookupDesktopKey().catch(() => {
+    client.setApiKey(undefined);
+    keySource = "none";
+  });
+  return keySync;
+}
+
+async function lookupDesktopKey(): Promise<void> {
+  const ep = await desktop.endpoint();
+  if ("error" in ep) {
+    client.setApiKey(undefined);
+    keySource = "none";
+    return;
+  }
+  const c = await desktop.cloudCredentials(ep);
+  client.setApiKey(
+    c.api_key,
+    c.code === "not_allowed"
+      ? "Or let this server use the Imference Desktop account: in Imference Desktop, turn on Settings › AI agents › " +
+          "Let AI agents spend my credits (the user must do it)."
+      : c.code === "no_api_key"
+        ? "Imference Desktop has no Imference account yet: the user can buy credits in it (Settings › Credits & account)."
+        : undefined,
+  );
+  keySource = c.api_key ? "desktop" : "none";
+}
+
+/** server.registerTool, refreshing the Desktop key before each call. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const registerTool = ((name: string, config: any, cb: (...a: any[]) => any) =>
+  server.registerTool(name, config, async (...a: unknown[]) => {
+    await syncDesktopKey();
+    return cb(...a);
+  })) as typeof server.registerTool;
+
 /** Desktop's local models (empty when Desktop isn't running). Never throws. */
 async function localModels() {
   const probe = await desktop.probe();
@@ -117,7 +172,7 @@ async function imagePreview(media: MediaRow): Promise<ContentBlock[]> {
 // Catalog tools (no API key required)
 // ---------------------------------------------------------------------------
 
-server.registerTool(
+registerTool(
   "list_models",
   {
     title: "List Imference models",
@@ -183,7 +238,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "get_model",
   {
     title: "Get full details of one model",
@@ -270,7 +325,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "list_formats",
   {
     title: "List model formats",
@@ -300,7 +355,7 @@ const LORA_OPT_IN =
   "on your own initiative to 'improve' an image — if one looks relevant, SUGGEST it to the " +
   "user and wait for their go-ahead.";
 
-server.registerTool(
+registerTool(
   "list_loras",
   {
     title: "List curated LoRAs",
@@ -363,7 +418,7 @@ function resolveRail(requested?: "credits" | "x402"): "credits" | "x402" {
   return resolveRailFor(client, requested);
 }
 
-server.registerTool(
+registerTool(
   "generate",
   {
     title: "Generate an image or video",
@@ -380,7 +435,8 @@ server.registerTool(
       "still running after wait_seconds, returns the request_id so you can poll with check_status. " +
       "run_on 'auto' (default) generates locally when Imference Desktop is running and has the model " +
       "downloaded (list_models shows `local`), else in the cloud; a local failure is reported, never " +
-      "silently retried as a paid cloud run.",
+      "silently retried as a paid cloud run. The result's `ran` says where it ran: always tell the " +
+      "user (local = on their computer, free; cloud = paid, with the credits spent).",
     inputSchema: {
       run_on: z
         .enum(["auto", "local", "cloud"])
@@ -479,7 +535,10 @@ server.registerTool(
         .min(0)
         .max(600)
         .optional()
-        .describe("How long to wait for completion before returning the request_id (default 120, 0 = return immediately)"),
+        .describe(
+          "How long to wait for completion before returning the request_id to poll with " +
+            "check_status (default 50 — MCP clients give up on a tool call after ~60s; 0 = return immediately)",
+        ),
       include_image: z
         .boolean()
         .optional()
@@ -496,7 +555,7 @@ server.registerTool(
       payload.model = payload.model || DEFAULT_MODEL || "";
       // An explicit rail asks for the cloud.
       const plan = await planGenerate(toolsCtx, run_on ?? (requestedRail ? "cloud" : "auto"), payload, payload.model || undefined);
-      if (plan.where === "local") return await runLocalGenerate(toolsCtx, plan, { include_image });
+      if (plan.where === "local") return await runLocalGenerate(toolsCtx, plan, { include_image, wait_seconds });
       const routeNote = plan.note;
       if (payload.img_url && !isRemoteUrl(payload.img_url)) {
         return fail(
@@ -554,15 +613,28 @@ server.registerTool(
         kind = res.kind;
       }
 
-      const waitMs = (wait_seconds ?? 120) * 1000;
+      const waitMs = (wait_seconds ?? LOCAL_WAIT_DEFAULT_S) * 1000;
+      // Shown in Imference Desktop too (Activity, then the gallery) when it runs.
+      await reportCloudStart(desktop, request_id, payload.prompt, payload.model);
       const status = await waitForStatus(client, request_id, waitMs);
       if (status.state === "failed") {
+        await reportCloudEnd(desktop, request_id, "error", status.error);
         return fail(new ImferenceError(status.error, undefined, status.code));
       }
       if (status.state === "done") {
+        await reportCloudEnd(desktop, request_id, "done");
         const preview = include_image === false ? [] : await imagePreview(status.media);
         return ok(
-          { status: "done", ran: "cloud", note: routeNote, rail, payment, loras: payload.loras, ...mediaSummary(status.media) },
+          {
+            status: "done",
+            ran: "cloud",
+            where: "the Imference cloud (paid)",
+            note: routeNote,
+            rail,
+            payment,
+            loras: payload.loras,
+            ...mediaSummary(status.media),
+          },
           preview,
         );
       }
@@ -586,25 +658,39 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "check_status",
   {
     title: "Check a generation or tool request",
     description:
-      "Check the status of a previously submitted generation or cloud editing-tool run. Returns " +
+      "Check the status of a previously submitted generation or editing-tool run. Returns " +
       "the media URL (tools: every output, plus the text of describe_image) when done, 'pending' " +
-      "while still running, or the failure reason.",
+      "while still running, or the failure reason. A local run (request_id local_…, still running " +
+      "in Imference Desktop) is waited for up to wait_seconds, then its file path is returned.",
     inputSchema: {
       request_id: z.string().describe("The request_id returned by generate or an editing tool"),
+      wait_seconds: z
+        .number()
+        .int()
+        .min(0)
+        .max(600)
+        .optional()
+        .describe("Local runs (local_…): how long to wait for the end (default 50)"),
       include_image: z
         .boolean()
         .optional()
         .describe("Embed the finished image in the result (default true; images ≤ 3MB only)"),
     },
   },
-  async ({ request_id, include_image }) => {
+  async ({ request_id, include_image, wait_seconds }) => {
     try {
+      if (isLocalRequestId(request_id)) {
+        return await checkLocal(request_id, (wait_seconds ?? LOCAL_WAIT_DEFAULT_S) * 1000);
+      }
       const status = await client.status(request_id);
+      if (status.state !== "pending") {
+        await reportCloudEnd(desktop, request_id, status.state === "done" ? "done" : "error", status.state === "failed" ? status.error : undefined);
+      }
       if (status.state === "done") {
         if (isToolMedia(status.media)) {
           const summary = summarizeToolMedia(status.media);
@@ -622,7 +708,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "download_media",
   {
     title: "Download a generated media file",
@@ -665,7 +751,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "get_balance",
   {
     title: "Get credit balance",
@@ -684,7 +770,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "buy_credits_with_wallet",
   {
     title: "Buy credits with the wallet (x402)",
@@ -731,7 +817,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "payment_config",
   {
     title: "Show configured payment rails",
@@ -746,7 +832,11 @@ server.registerTool(
     const caps = client.spendingCaps;
     return ok({
       base_url: process.env.IMFERENCE_BASE_URL ?? "https://imference.com",
-      credits_rail: client.hasApiKey ? "configured (IMFERENCE_API_KEY set)" : "not configured",
+      credits_rail: client.hasApiKey
+        ? keySource === "desktop"
+          ? "configured (the Imference Desktop account — allowed in Desktop's Settings › AI agents)"
+          : "configured (IMFERENCE_API_KEY set)"
+        : "not configured" + (client.missingKeyHint ? ` — ${client.missingKeyHint}` : ""),
       x402_rail: client.hasWallet
         ? {
             status: "configured",
@@ -764,7 +854,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "wallet_balance",
   {
     title: "Get wallet USDC balance",
@@ -784,7 +874,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "list_media",
   {
     title: "List generated media",
@@ -805,7 +895,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "list_history",
   {
     title: "List call history",
@@ -840,11 +930,12 @@ server.registerTool(
 // Editing tools (one MCP tool per catalog entry) + list_tools
 // ---------------------------------------------------------------------------
 
-const desktop = new DesktopClient();
+// Desktop labels the runs it starts for us with the client's name ("via Claude").
+const desktop = new DesktopClient({ agentName: () => server.server.getClientVersion()?.name });
 const toolsCtx: ToolsContext = { client, desktop };
 
 function registerEditingTools(catalog: Catalog): void {
-  server.registerTool(
+  registerTool(
     "list_tools",
     {
       title: "List editing tools",
@@ -887,7 +978,7 @@ function registerEditingTools(catalog: Catalog): void {
       continue;
     }
     taken.add(def.name);
-    server.registerTool(
+    registerTool(
       def.name,
       { title: def.title, description: def.description, inputSchema: def.inputSchema },
       async (args: unknown) => runEditTool(toolsCtx, def, (args ?? {}) as Record<string, unknown>),

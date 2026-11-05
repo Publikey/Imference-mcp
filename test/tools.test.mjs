@@ -16,6 +16,7 @@ import { ImferenceClient } from "../dist/client.js";
 import { bundledCatalog, loadCatalog, normalizeTools } from "../dist/catalog.js";
 import { DesktopClient, discoveryFilePath, userConfigDir } from "../dist/desktop.js";
 import { localAvailability, planGenerate, runLocalGenerate } from "../dist/generate.js";
+import { checkLocal } from "../dist/local-jobs.js";
 import {
   buildMcpTool,
   coerceParam,
@@ -984,7 +985,7 @@ test("stdio: list_models / get_model flag instruction-edit models", async () => 
 // generate: local route through Imference Desktop (run_on)
 // ---------------------------------------------------------------------------
 
-function desktopGen({ models = [{ code: "anima", cached: true, active: true }, { code: "flux", cached: false }], reason, generate } = {}) {
+function desktopGen({ models = [{ code: "anima", name: "Anima", cached: true, active: true }, { code: "flux", name: "Flux", cached: false }], reason, generate } = {}) {
   desktopTools();
   desk.routes["GET /v1/generation"] = (_req, res) =>
     json(res, 200, { ready: !reason, engine_state: "ready", model: models.find((m) => m.active) ?? null, models, reason });
@@ -1100,9 +1101,135 @@ test("stdio: generate runs locally in Desktop; list_models flags local models", 
   const gen = lines.find((l) => l.id === 2).result;
   assert.equal(gen.isError, undefined, gen.content[0].text);
   assert.equal(JSON.parse(gen.content[0].text).ran, "local");
+  // Desktop labels the run with the MCP client's name (INIT's clientInfo.name).
+  const post = desk.requests.find((q) => q.method === "POST" && q.path === "/v1/generate");
+  assert.equal(post.headers["x-imference-agent"], "t");
   const listed = JSON.parse(lines.find((l) => l.id === 3).result.content[0].text);
   assert.deepEqual(listed.models.map((m) => [m.model_code, m.local]), [["anima", "ready"], ["flux", "not_downloaded"]]);
   const cloudPath = lines.find((l) => l.id === 4).result;
   assert.equal(cloudPath.isError, true);
   assert.match(cloudPath.content[0].text, /http\(s\) URL in the cloud/);
+});
+
+// ---------------------------------------------------------------------------
+// Local runs longer than a tool call: parked, picked up by check_status
+// ---------------------------------------------------------------------------
+
+test("generate local: still running after wait_seconds → pending local_ id, check_status gets the result", async () => {
+  const outPath = await tempFile("slow-gen.png", PNG);
+  desktopGen({
+    generate: (_req, res) =>
+      setTimeout(() => json(res, 200, { model: "anima", seed: 9, outputs: [{ type: "image", format: "png", path: outPath }] }), 300),
+  });
+  const c = ctx({ desktop: desktopUp() });
+  const plan = await planGenerate(c, "auto", { prompt: "x" }, "anima");
+  const r = await runLocalGenerate(c, plan, { wait_seconds: 0 });
+  const pending = resultJson(r);
+  assert.equal(pending.status, "pending");
+  assert.equal(pending.ran, "local");
+  assert.match(pending.request_id, /^local_/);
+  assert.match(pending.note, /check_status/);
+  // The user knows the model by the name Desktop shows.
+  assert.equal(pending.model_name, "Anima");
+  assert.match(pending.note, /generation with Anima/);
+  const done = await checkLocal(pending.request_id, 5000);
+  const out = resultJson(done);
+  assert.equal(out.status, "done");
+  assert.equal(out.ran, "local");
+  assert.match(out.where, /this computer.*model Anima/);
+  assert.equal(out.model_name, "Anima");
+  assert.equal(out.path, outPath);
+  assert.equal(done.content[1].type, "image");
+  // Picked up once: the id is gone afterwards.
+  assert.match(errText(await checkLocal(pending.request_id, 10)), /Unknown local request/);
+  // Only one run on the GPU.
+  assert.equal(desk.requests.filter((q) => q.method === "POST").length, 1);
+});
+
+test("check_status on a parked local run: pending again while it runs, then its failure", async () => {
+  desktopGen({
+    generate: (_req, res) => setTimeout(() => json(res, 500, { error: { code: "oom", message: "CUDA out of memory" } }), 300),
+  });
+  const c = ctx({ desktop: desktopUp() });
+  const plan = await planGenerate(c, "auto", { prompt: "x" }, "anima");
+  const id = resultJson(await runLocalGenerate(c, plan, { wait_seconds: 0 })).request_id;
+  assert.equal(resultJson(await checkLocal(id, 10)).status, "pending");
+  const text = errText(await checkLocal(id, 5000));
+  assert.match(text, /\(oom\)/);
+  assert.match(text, /run_on: 'cloud'/);
+});
+
+test("editing tool local: a long run is parked too, never retried in the cloud", async () => {
+  const outPath = await tempFile("slow-tool.png", PNG);
+  desktopTools();
+  desk.routes["POST /v1/tools/upscale"] = (_req, res) =>
+    setTimeout(() => json(res, 200, { tool_id: "upscale", outputs: [{ name: "image", type: "image", format: "png", path: outPath }] }), 300);
+  const r = await runEditTool(ctx({ apiKey: "k", desktop: desktopUp() }), toolDef("upscale"), {
+    image: "https://x/a.png", wait_seconds: 0,
+  });
+  const pending = resultJson(r);
+  assert.equal(pending.status, "pending");
+  assert.equal(pending.tool, "upscale");
+  const out = resultJson(await checkLocal(pending.request_id, 5000));
+  assert.equal(out.ran, "local");
+  assert.deepEqual(out.outputs, [{ name: "image", type: "image", format: "png", path: outPath }]);
+  assert.equal(api.requests.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Cloud runs with the Imference Desktop account's key
+// ---------------------------------------------------------------------------
+
+test("stdio: no IMFERENCE_API_KEY → cloud runs use the key Desktop hands out, and say so when it won't", async () => {
+  let allowed = true;
+  desktopTools();
+  desk.routes["GET /v1/cloud-credentials"] = (_req, res) =>
+    allowed
+      ? json(res, 200, { api_key: "imf_from_desktop" })
+      : json(res, 403, { error: { code: "not_allowed", message: "turn it on in Settings" } });
+  api.routes["POST /generate"] = (_req, res) => json(res, 200, { request_id: "req-1", kind: "image" });
+  api.routes["/ondemand/status"] = (_req, res) =>
+    json(res, 200, { data: { RequestID: "req-1", Kind: "image", URL: `${api.url}/blob/out.png`, Format: "png", Seed: "1", Timestamp: "2026-11-05T10:00:00Z" } });
+  const env = { IMFERENCE_BASE_URL: api.url, IMFERENCE_TOOLS_CATALOG: "bundled", IMFERENCE_DESKTOP_URL: desk.url, IMFERENCE_DESKTOP_TOKEN: "dtok" };
+  const gen = { model: "flux", prompt: "a cat", run_on: "cloud", include_image: false };
+  let lines = await rpc(env, [
+    ...INIT,
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "generate", arguments: gen } },
+    { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "payment_config", arguments: {} } },
+  ]);
+  const done = lines.find((l) => l.id === 2).result;
+  assert.equal(done.isError, undefined, done.content[0].text);
+  assert.equal(JSON.parse(done.content[0].text).ran, "cloud");
+  const post = api.requests.find((q) => q.method === "POST" && q.path === "/generate");
+  assert.equal(post.headers.authorization, "Bearer imf_from_desktop");
+  assert.match(JSON.parse(lines.find((l) => l.id === 3).result.content[0].text).credits_rail, /Imference Desktop account/);
+  // Desktop is told about the cloud run (its Activity + gallery): started, then done.
+  const reports = desk.requests.filter((q) => q.path === "/v1/agent-runs").map((q) => JSON.parse(q.body));
+  assert.deepEqual(reports.map((r) => [r.state, r.request_id, r.label, r.model]), [
+    ["running", "req-1", "a cat", "flux"],
+    ["done", "req-1", "a cat", "flux"],
+  ]);
+
+  // Permission turned off in Desktop: no key, and the error says where to turn it on.
+  allowed = false;
+  api.requests = [];
+  lines = await rpc(env, [...INIT, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "generate", arguments: gen } }]);
+  const refused = lines.find((l) => l.id === 2).result;
+  assert.equal(refused.isError, true);
+  assert.match(refused.content[0].text, /Let AI agents spend my credits/);
+  assert.ok(!api.requests.some((q) => q.path === "/generate"));
+});
+
+test("stdio: IMFERENCE_API_KEY wins over Desktop's account", async () => {
+  desktopTools();
+  desk.routes["GET /v1/cloud-credentials"] = (_req, res) => json(res, 200, { api_key: "imf_from_desktop" });
+  api.routes["POST /generate"] = (_req, res) => json(res, 200, { request_id: "req-1", kind: "image" });
+  api.routes["/ondemand/status"] = (_req, res) =>
+    json(res, 200, { data: { RequestID: "req-1", Kind: "image", URL: `${api.url}/blob/out.png`, Format: "png", Seed: "1", Timestamp: "2026-11-05T10:00:00Z" } });
+  await rpc(
+    { IMFERENCE_API_KEY: "imf_env", IMFERENCE_BASE_URL: api.url, IMFERENCE_TOOLS_CATALOG: "bundled", IMFERENCE_DESKTOP_URL: desk.url, IMFERENCE_DESKTOP_TOKEN: "dtok" },
+    [...INIT, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "generate", arguments: { model: "flux", prompt: "x", run_on: "cloud", include_image: false } } }],
+  );
+  assert.equal(api.requests.find((q) => q.path === "/generate").headers.authorization, "Bearer imf_env");
+  assert.ok(!desk.requests.some((q) => q.path === "/v1/cloud-credentials"));
 });

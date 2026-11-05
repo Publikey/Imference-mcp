@@ -165,7 +165,9 @@ Desktop writes at start (`<config dir>/imference-desktop-go/local-api.json`:
 (`"local"` for local runs), `outputs` (`url` or `path`, `format`, …), `text`
 for `describe_image`, `credits`, `duration_ms` — plus the image outputs
 embedded (≤ 3 MB) so the agent can see them. A cloud run still going after
-`wait_seconds` (default 120) returns its `request_id` for `check_status`.
+`wait_seconds` (default 50) returns its `request_id` for `check_status`;
+a local run still going returns a `local_…` id that `check_status` waits on
+(MCP clients like Claude Desktop give up on a tool call after ~60 s).
 
 Examples — just ask your agent:
 
@@ -272,7 +274,7 @@ The result has `ran: "local"`, `outputs[].path` (the file in the gallery),
 2. Submits the request — credits: `POST /generate`; x402: prices the request
    from the catalog, then `POST /ondemand/generate` with the signed payment.
 3. Polls the status endpoint with exponential backoff for up to `wait_seconds`
-   (default 120). Images are usually ready in well under a minute; videos can
+   (default 50 — MCP clients give up on a tool call after ~60 s). Images are usually ready in well under a minute; videos can
    take longer — if still running, the tool returns a `request_id` to poll
    with `check_status`.
 4. Returns the media URL, and embeds the image (≤ 3 MB) in the result so the

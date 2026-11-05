@@ -13,6 +13,8 @@
  *                             {"tool_id", "outputs": [{name, type, format, path, text?}], "duration_ms"}
  *                             or {"error": {code, message}} with HTTP 4xx/5xx
  *   GET  /v1/generation       local models (cached on disk or not), loaded model, engine state
+ *   GET  /v1/cloud-credentials {"api_key"} when the user lets agents spend their credits
+ *   POST /v1/agent-runs       a cloud run of ours, shown in Desktop (Activity + gallery)
  *   POST /v1/generate         {model?, prompt, format_code?, ...} → synchronous
  *                             {"model", "seed", "outputs": [{type, format, path, width, height}]}
  */
@@ -27,6 +29,11 @@ export interface DesktopOptions {
   homedir?: string;
   /** Timeout of the reachability probe (GET /v1/tools). */
   probeTimeoutMs?: number;
+  /**
+   * The MCP client's name (claude-ai, claude-code, cursor…), sent as
+   * X-Imference-Agent: Desktop shows "via Claude" on the runs it starts.
+   */
+  agentName?: () => string | undefined;
   /** Timeout of one synchronous local run. */
   runTimeoutMs?: number;
 }
@@ -57,6 +64,17 @@ export interface DesktopRunResult {
   outputs: DesktopOutput[];
   duration_ms?: number;
   [key: string]: unknown;
+}
+
+/** POST /v1/agent-runs: a cloud run this server started, shown in Desktop. */
+export interface DesktopRunReport {
+  id: string;
+  state: "running" | "done" | "error";
+  kind: "generate";
+  label: string;
+  model: string;
+  request_id: string;
+  error?: string;
 }
 
 /** One local model (GET /v1/generation). */
@@ -96,6 +114,8 @@ export interface DesktopGenerateBody {
 
 export interface DesktopGenerateResult {
   model?: string;
+  /** The name Desktop shows ("RedCraft Turbo"); model is its code. */
+  model_name?: string;
   seed?: number;
   outputs: DesktopOutput[];
   duration_ms?: number;
@@ -201,6 +221,8 @@ export class DesktopClient {
     const h: Record<string, string> = { Accept: "application/json" };
     if (json) h["Content-Type"] = "application/json";
     if (ep.token) h["Authorization"] = `Bearer ${ep.token}`;
+    const agent = this.opts.agentName?.();
+    if (agent) h["X-Imference-Agent"] = agent.slice(0, 64);
     return h;
   }
 
@@ -266,6 +288,46 @@ export class DesktopClient {
       return { ...body, models: Array.isArray(body.models) ? body.models : [] };
     } catch {
       return undefined;
+    }
+  }
+
+  /**
+   * The account key Desktop lets agents use for cloud runs (GET
+   * /v1/cloud-credentials): {api_key}, or {reason} — not allowed in Desktop's
+   * settings, no account yet, or an older Desktop. Never throws.
+   */
+  async cloudCredentials(ep: DesktopEndpoint): Promise<{ api_key?: string; code?: string; reason?: string }> {
+    try {
+      const res = await fetch(`${ep.url}/v1/cloud-credentials`, {
+        headers: this.headers(ep, false),
+        signal: AbortSignal.timeout(this.opts.probeTimeoutMs ?? 2000),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        api_key?: unknown;
+        error?: { code?: unknown; message?: unknown };
+      };
+      if (res.ok && typeof body.api_key === "string" && body.api_key) return { api_key: body.api_key };
+      if (res.status === 404 && !body.error?.code) return { code: "unsupported", reason: "this Imference Desktop version can't share its account" };
+      return {
+        code: typeof body.error?.code === "string" ? body.error.code : "error",
+        reason: typeof body.error?.message === "string" ? body.error.message : `HTTP ${res.status}`,
+      };
+    } catch (e) {
+      return { code: "desktop_unavailable", reason: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /** Tell Desktop about a cloud run (POST /v1/agent-runs). Never throws. */
+  async reportRun(ep: DesktopEndpoint, body: DesktopRunReport): Promise<void> {
+    try {
+      await fetch(`${ep.url}/v1/agent-runs`, {
+        method: "POST",
+        headers: this.headers(ep, true),
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(this.opts.probeTimeoutMs ?? 2000),
+      });
+    } catch {
+      /* best effort */
     }
   }
 

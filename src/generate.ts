@@ -20,11 +20,18 @@ import {
   type DesktopGenerateBody,
   type DesktopGenerationInfo,
 } from "./desktop.js";
+import { LOCAL_WAIT_DEFAULT_S, park, pendingResult, within } from "./local-jobs.js";
 import { ok, ToolRunError, type ToolResult } from "./results.js";
 import { previewOutputs, resolveLocalPath, type OutputSummary, type RunOn, type ToolsContext } from "./tools.js";
 
 export type GeneratePlan =
-  | { where: "local"; endpoint: DesktopEndpoint; body: DesktopGenerateBody }
+  | {
+      where: "local";
+      endpoint: DesktopEndpoint;
+      body: DesktopGenerateBody;
+      /** The model's name as Desktop shows it (the user knows it by that name). */
+      modelName?: string;
+    }
   | { where: "cloud"; note?: string };
 
 /** Options the local engine doesn't take: a reason, or undefined. */
@@ -111,52 +118,70 @@ export async function planGenerate(
       : " Use run_on: 'cloud'.";
     return refuse(why.includes("downloaded") ? "model_not_cached" : "not_available", why + "." + hint);
   }
-  return { where: "local", endpoint: probe.endpoint, body: localBody(payload, model, ctx.cwd) };
+  const target = model ? info.models.find((x) => x.code === model) : info.model;
+  return {
+    where: "local",
+    endpoint: probe.endpoint,
+    body: localBody(payload, model, ctx.cwd),
+    modelName: target?.name || target?.code,
+  };
 }
 
 /** Run a planned local generation. A failure is a ToolRunError (no paid fallback). */
 export async function runLocalGenerate(
   ctx: ToolsContext,
   plan: Extract<GeneratePlan, { where: "local" }>,
-  opts: { include_image?: boolean } = {},
+  opts: { include_image?: boolean; wait_seconds?: number } = {},
 ): Promise<ToolResult> {
-  let res;
-  try {
-    res = await ctx.desktop.generate(plan.endpoint, plan.body);
-  } catch (e) {
-    if (!(e instanceof DesktopError)) throw e;
-    throw new ToolRunError(
-      e.code,
-      `local generation in Imference Desktop failed: ${e.message}` +
-        (e.code === "invalid_input" ? "" : " To run it in the cloud instead (paid), retry with run_on: 'cloud'."),
+  const work = (async (): Promise<ToolResult> => {
+    let res;
+    try {
+      res = await ctx.desktop.generate(plan.endpoint, plan.body);
+    } catch (e) {
+      if (!(e instanceof DesktopError)) throw e;
+      throw new ToolRunError(
+        e.code,
+        `local generation in Imference Desktop failed: ${e.message}` +
+          (e.code === "invalid_input" ? "" : " To run it in the cloud instead (paid), retry with run_on: 'cloud'."),
+      );
+    }
+    const outputs: OutputSummary[] = res.outputs.map((o) => {
+      const s: OutputSummary = {};
+      if (typeof o.name === "string") s.name = o.name;
+      if (typeof o.type === "string") s.type = o.type;
+      if (typeof o.format === "string") s.format = o.format;
+      if (typeof o.path === "string") s.path = o.path;
+      if (typeof o.width === "number" && o.width > 0) s.width = o.width;
+      if (typeof o.height === "number" && o.height > 0) s.height = o.height;
+      return s;
+    });
+    const preview = opts.include_image === false ? [] : await previewOutputs(ctx.client, outputs);
+    return ok(
+      {
+        status: "done",
+        ran: "local",
+        where: `this computer's GPU, in Imference Desktop (model ${res.model_name || plan.modelName || res.model || "?"}) — free, nothing sent to the cloud`,
+        request_id: "local",
+        model: res.model,
+        model_name: res.model_name || plan.modelName,
+        seed: res.seed,
+        outputs,
+        path: outputs[0]?.path,
+        duration_ms: res.duration_ms,
+        credits: 0,
+        note:
+          "Generated locally by Imference Desktop and saved in its gallery (the path above). " +
+          "Tell the user it ran on their computer, for free.",
+      },
+      preview,
     );
-  }
-  const outputs: OutputSummary[] = res.outputs.map((o) => {
-    const s: OutputSummary = {};
-    if (typeof o.name === "string") s.name = o.name;
-    if (typeof o.type === "string") s.type = o.type;
-    if (typeof o.format === "string") s.format = o.format;
-    if (typeof o.path === "string") s.path = o.path;
-    if (typeof o.width === "number" && o.width > 0) s.width = o.width;
-    if (typeof o.height === "number" && o.height > 0) s.height = o.height;
-    return s;
-  });
-  const preview = opts.include_image === false ? [] : await previewOutputs(ctx.client, outputs);
-  return ok(
-    {
-      status: "done",
-      ran: "local",
-      request_id: "local",
-      model: res.model,
-      seed: res.seed,
-      outputs,
-      path: outputs[0]?.path,
-      duration_ms: res.duration_ms,
-      credits: 0,
-      note: "Generated on this computer by Imference Desktop (free); also saved in its gallery.",
-    },
-    preview,
-  );
+  })();
+  const waitS = opts.wait_seconds ?? LOCAL_WAIT_DEFAULT_S;
+  const done = await within(work, waitS * 1000);
+  if (done) return done.value;
+  const name = plan.modelName || plan.body.model;
+  const what = `generation${name ? ` with ${name}` : ""}`;
+  return pendingResult(park(work, what), what, waitS, { model: plan.body.model, model_name: plan.modelName });
 }
 
 /** list_models: which generation models Desktop can run locally right now. */
