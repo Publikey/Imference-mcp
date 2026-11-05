@@ -55,6 +55,14 @@ Or in a `mcpServers` config (Claude Desktop, etc.):
 > (`rm -rf "$(npm config get cache)/_npx"`) and retry, or install permanently
 > with `npm i -g imference-mcp` and use `imference-mcp` as the command.
 
+**With Imference Desktop** — Settings › AI agents › *Connect to Claude* sets
+all this up for you (no Node.js needed), and `generate` and the editing tools
+then run on your own GPU for free. See [Local generation](#local-generation-imference-desktop).
+
+**Without npm** — each GitHub release carries `imference-mcp.js`, the whole
+server in one file (plus `SHA256SUMS`). Run it with Node.js ≥ 20.10:
+`"command": "node", "args": ["/path/to/imference-mcp.js"]`.
+
 Get an API key and credits at [imference.com](https://imference.com) — or skip
 the key entirely and pay per generation from a wallet (see
 [Payment rails](#payment-rails)). Generation costs start at 3 credits
@@ -72,11 +80,11 @@ recommended quality tags, pick a banner format, generate, and show the result.
 
 | Tool | Purpose | Needs |
 |---|---|---|
-| `list_models` | Model overview for picking: kind, style family, prompt style, cost, capabilities (`kind: "image-edit"` for the instruction-edit models) | – |
+| `list_models` | Model overview for picking: kind, style family, prompt style, cost, capabilities, `local` availability in Imference Desktop (`kind: "image-edit"` for the instruction-edit models) | – |
 | `get_model` | One model in full: description, prompting recommendations, exact parameters & bounds, formats & price multipliers | – |
 | `list_formats` | Predefined output formats per model (`square`, `portrait`, `landscape-wide`, …) | – |
 | `list_loras` | Curated LoRAs: category, compatible families, weight bounds, trigger words | – |
-| `generate` | Submit a generation and wait; embeds the finished image in the result | API key or wallet |
+| `generate` | Generate and wait — locally in Imference Desktop (free) or in the cloud; embeds the finished image in the result | API key or wallet (cloud), Imference Desktop (local) |
 | `check_status` | Poll a still-running generation | – |
 | `download_media` | Save an image or video to a local file | – |
 | `get_balance` | Remaining credits of the API key | API key |
@@ -233,6 +241,33 @@ tool in the cloud. The catalog tools, `check_status` and local editing-tool runs
 
 ## How `generate` works
 
+`run_on` picks where it runs:
+
+- `auto` (default) — locally in Imference Desktop when it's running and can
+  run this request (see below), else in the cloud; when Desktop is running
+  but can't, the result's `note` says why. **A local failure is reported as
+  an error, never retried as a paid cloud run**: the agent retries with
+  `run_on: 'cloud'` if that's what you want.
+- `local` — Imference Desktop only; never the cloud.
+- `cloud` — the Imference API (also the default when `rail` is given).
+
+### Local generation (Imference Desktop)
+
+Desktop generates on this computer's GPU, free, with the model's defaults
+(format, steps, guidance, quality tags) for whatever you omit; the image is
+also saved in Desktop's gallery. It needs the local engine installed and the
+model **downloaded in Desktop**: a downloaded model that isn't loaded is
+loaded first, but Desktop never starts a download for an agent
+(`model_not_cached`). `list_models` shows `local: "ready"` /
+`"not_downloaded"` while Desktop is running. Without `model`, it uses the model
+selected in Desktop. `img_url` also takes a local file path or `data:` URI
+there (img2img). LoRAs, `batch_nbr` > 1 and the video knobs are cloud-only.
+
+The result has `ran: "local"`, `outputs[].path` (the file in the gallery),
+`seed`, `credits: 0`.
+
+### Cloud generation
+
 1. Resolves the payment rail (explicit `rail` arg > API key > wallet).
 2. Submits the request — credits: `POST /generate`; x402: prices the request
    from the catalog, then `POST /ondemand/generate` with the signed payment.
@@ -271,7 +306,7 @@ The editing-tool catalog snapshot is `src/tools-catalog.json`; refresh it from
 the engine when manifests change:
 `python -m imference_engine.tools export > src/tools-catalog.json`.
 
-Requires Node.js ≥ 18. Run the server locally instead of via npx:
+Requires Node.js ≥ 20.10. Run the server locally instead of via npx:
 
 ```bash
 claude mcp add imference -e IMFERENCE_API_KEY=your-api-key -- node /path/to/imference-mcp/dist/index.js
@@ -298,13 +333,19 @@ git push --follow-tags
 ```
 
 The workflow refuses a tag that doesn't match `package.json`, runs the tests,
-publishes to npm with provenance, and creates the GitHub release.
+publishes to npm with provenance, and creates the GitHub release with the
+single-file bundle `imference-mcp.js` (`npm run bundle`, esbuild) and its
+`SHA256SUMS` — what Imference Desktop downloads. `npm version` also rewrites
+`src/version.ts`, the version the server reports.
 
 Repo layout:
 
 ```
 src/index.ts    MCP server: tool registration + stdio transport
 src/client.ts   HTTP client for the Imference API (catalog, pricing, x402)
+src/desktop.ts  client for Imference Desktop's local API (tools, generation)
+src/generate.ts generate's run_on routing and local runs
+src/tools.ts    editing tools (one MCP tool per catalog entry)
 test/           unit tests against a local mock server
 ```
 

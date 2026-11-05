@@ -37,3 +37,16 @@ jobs:
             '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
             '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
             | node dist/index.js | grep -q '"tools"'
+
+      # The single-file bundle Imference Desktop downloads (release asset):
+      # it must start from a folder of its own, with nothing but Node.
+      - name: Smoke test the release bundle
+        run: |
+          npm run bundle
+          mkdir -p /tmp/bundle && cp release/imference-mcp.js /tmp/bundle/
+          cd /tmp/bundle
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            | IMFERENCE_TOOLS_CATALOG=bundled node imference-mcp.js | grep -q '"generate"'

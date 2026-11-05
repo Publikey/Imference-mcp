@@ -12,6 +12,9 @@
  *   POST /v1/tools/{tool_id}  {"inputs", "params"} → synchronous result
  *                             {"tool_id", "outputs": [{name, type, format, path, text?}], "duration_ms"}
  *                             or {"error": {code, message}} with HTTP 4xx/5xx
+ *   GET  /v1/generation       local models (cached on disk or not), loaded model, engine state
+ *   POST /v1/generate         {model?, prompt, format_code?, ...} → synchronous
+ *                             {"model", "seed", "outputs": [{type, format, path, width, height}]}
  */
 
 import { readFile } from "node:fs/promises";
@@ -54,6 +57,48 @@ export interface DesktopRunResult {
   outputs: DesktopOutput[];
   duration_ms?: number;
   [key: string]: unknown;
+}
+
+/** One local model (GET /v1/generation). */
+export interface DesktopGenModel {
+  code: string;
+  name?: string;
+  backend?: string;
+  /** The weights are on this computer: Desktop can load it without a download. */
+  cached?: boolean;
+  active?: boolean;
+  video?: boolean;
+}
+
+export interface DesktopGenerationInfo {
+  ready?: boolean;
+  engine_state?: string;
+  model?: DesktopGenModel | null;
+  models: DesktopGenModel[];
+  /** Why ready is false: engine_not_installed, no_model, edit_model_loaded. */
+  reason?: string;
+}
+
+/** POST /v1/generate. Omitted fields = the model's defaults. */
+export interface DesktopGenerateBody {
+  model?: string;
+  prompt: string;
+  negative_prompt?: string;
+  format_code?: string;
+  steps?: number;
+  guidance_scale?: number;
+  seed?: number;
+  scheduler?: string;
+  /** img2img source: a local path, https URL or data URI. */
+  source_image?: string;
+  strength?: number;
+}
+
+export interface DesktopGenerateResult {
+  model?: string;
+  seed?: number;
+  outputs: DesktopOutput[];
+  duration_ms?: number;
 }
 
 export type DesktopProbe =
@@ -197,12 +242,49 @@ export class DesktopClient {
     inputs: Record<string, string | string[]>,
     params: Record<string, unknown>,
   ): Promise<DesktopRunResult> {
+    const out = (await this.post(ep, `/v1/tools/${encodeURIComponent(toolId)}`, { inputs, params }, `'${toolId}'`)) as
+      | DesktopRunResult
+      | undefined;
+    if (!out || !Array.isArray(out.outputs)) {
+      throw new DesktopError("internal", "local API returned no outputs");
+    }
+    return out;
+  }
+
+  /**
+   * What Desktop can generate locally (GET /v1/generation). undefined when
+   * this Desktop version has no local generation (HTTP 404) or doesn't answer.
+   */
+  async generationInfo(ep: DesktopEndpoint): Promise<DesktopGenerationInfo | undefined> {
+    try {
+      const res = await fetch(`${ep.url}/v1/generation`, {
+        headers: this.headers(ep, false),
+        signal: AbortSignal.timeout(this.opts.probeTimeoutMs ?? 2000),
+      });
+      if (!res.ok) return undefined;
+      const body = (await res.json()) as DesktopGenerationInfo;
+      return { ...body, models: Array.isArray(body.models) ? body.models : [] };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Generate locally (POST /v1/generate, synchronous). Throws DesktopError like run(). */
+  async generate(ep: DesktopEndpoint, body: DesktopGenerateBody): Promise<DesktopGenerateResult> {
+    const out = (await this.post(ep, "/v1/generate", body, "generation")) as DesktopGenerateResult | undefined;
+    if (!out || !Array.isArray(out.outputs)) {
+      throw new DesktopError("internal", "local API returned no outputs");
+    }
+    return out;
+  }
+
+  private async post(ep: DesktopEndpoint, path: string, payload: unknown, what: string): Promise<unknown> {
     let res: Response;
     try {
-      res = await fetch(`${ep.url}/v1/tools/${encodeURIComponent(toolId)}`, {
+      res = await fetch(`${ep.url}${path}`, {
         method: "POST",
         headers: this.headers(ep, true),
-        body: JSON.stringify({ inputs, params }),
+        body: JSON.stringify(payload),
         signal: AbortSignal.timeout(this.opts.runTimeoutMs ?? 15 * 60_000),
       });
     } catch (e) {
@@ -210,7 +292,7 @@ export class DesktopClient {
       throw new DesktopError(
         timedOut ? "timeout" : "desktop_unavailable",
         timedOut
-          ? `local run of '${toolId}' did not finish in time`
+          ? `local run of ${what} did not finish in time`
           : `${DESKTOP_NOT_RUNNING} (${e instanceof Error ? e.message : String(e)})`,
       );
     }
@@ -236,10 +318,6 @@ export class DesktopClient {
         res.status,
       );
     }
-    const out = body as DesktopRunResult | undefined;
-    if (!out || !Array.isArray(out.outputs)) {
-      throw new DesktopError("internal", "local API returned no outputs");
-    }
-    return out;
+    return body;
   }
 }

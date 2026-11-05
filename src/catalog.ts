@@ -2,14 +2,13 @@
  * Editing-tool catalog: the public manifests published by the engine
  * (`python -m imference_engine.tools export`) and served by GET /api/tools.
  *
- * A snapshot ships with the package (tools-catalog.json next to this file);
+ * A snapshot ships inside the package (tools-catalog.json, imported at build);
  * at startup the server tries the live catalog with a short timeout and falls
  * back to the snapshot, so it always starts — offline included.
  */
 
-import { readFileSync } from "node:fs";
-
 import type { ImferenceClient } from "./client.js";
+import bundledCatalogJson from "./tools-catalog.json" with { type: "json" };
 
 export interface InputSpec {
   type: "image" | "mask" | "video" | string;
@@ -126,10 +125,8 @@ export function normalizeTools(raw: unknown[]): CatalogTool[] {
 
 /** The snapshot bundled with the package (dist/tools-catalog.json). */
 export function bundledCatalog(): CatalogTool[] {
-  const raw = JSON.parse(readFileSync(new URL("./tools-catalog.json", import.meta.url), "utf8")) as {
-    tools?: unknown[];
-  };
-  return normalizeTools(raw.tools ?? []);
+  // Imported, not read from disk: the single-file bundle carries it inline.
+  return normalizeTools((bundledCatalogJson as { tools?: unknown[] }).tools ?? []);
 }
 
 /**

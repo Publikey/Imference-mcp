@@ -42,6 +42,8 @@ import {
 } from "./client.js";
 import { loadCatalog, type Catalog } from "./catalog.js";
 import { DesktopClient } from "./desktop.js";
+import { VERSION } from "./version.js";
+import { isRemoteUrl, localAvailability, planGenerate, runLocalGenerate } from "./generate.js";
 import { fail, ok, previewFromUrl, type ContentBlock } from "./results.js";
 import {
   buildMcpTool,
@@ -80,8 +82,15 @@ const DEFAULT_MODEL = process.env.IMFERENCE_DEFAULT_MODEL;
 
 const server = new McpServer({
   name: "imference",
-  version: "0.4.0",
+  version: VERSION,
 });
+
+/** Desktop's local models (empty when Desktop isn't running). Never throws. */
+async function localModels() {
+  const probe = await desktop.probe();
+  if (!probe.reachable) return localAvailability(undefined);
+  return localAvailability(await desktop.generationInfo(probe.endpoint));
+}
 
 function mediaSummary(m: MediaRow) {
   return {
@@ -129,7 +138,7 @@ server.registerTool(
   },
   async ({ kind }) => {
     try {
-      const models = await client.listModels();
+      const [models, local] = await Promise.all([client.listModels(), localModels()]);
       const rows = models
         .map((m) => ({
           model_code: m.model_code,
@@ -151,6 +160,8 @@ server.registerTool(
           // Instruction-edit models are used through edit_with_instructions.
           edit_model: isEditModel(m) ? true : undefined,
           max_duration_s: m.duration_s_max ?? undefined,
+          // Imference Desktop on this computer: ready = generate with run_on local (free).
+          local: local.get(m.model_code),
         }))
         .filter((m) => (kind ? kind === "all" || m.kind === kind : m.kind !== "image-edit"));
       return ok({
@@ -160,7 +171,11 @@ server.registerTool(
           "Call get_model with a model_code for full details (parameters, bounds, formats, prompting tips). " +
           "Instruction-edit models (kind image-edit, list them with kind: \"image-edit\") edit an existing " +
           "image from a plain-words instruction: use them with the edit_with_instructions tool (its `model`), " +
-          "never with generate.",
+          "never with generate." +
+          (local.size
+            ? " `local: ready` = Imference Desktop runs it on this computer for free (generate's default " +
+              "run_on 'auto' uses it); `not_downloaded` = download it in Desktop first."
+            : ""),
       });
     } catch (e) {
       return fail(e);
@@ -353,7 +368,8 @@ server.registerTool(
   {
     title: "Generate an image or video",
     description:
-      "Submit a generation request to Imference and wait for the result. The media kind (image " +
+      "Generate an image or video and wait for the result — on this computer's GPU with Imference " +
+      "Desktop (free, run_on), or in the Imference cloud. The media kind (image " +
       "or video) is determined by the model — use list_models to pick a model_code, and " +
       "get_model to learn how to prompt it and which parameters it accepts. Size and " +
       "aspect ratio are chosen with format_code (a predefined format from list_formats), never " +
@@ -361,8 +377,19 @@ server.registerTool(
       "either the credits rail (API key balance) or the x402 rail (pay-per-generation in USDC " +
       "on Base, signed with the configured wallet); defaults to credits when an API key is set, " +
       "else x402 when a wallet is set. Returns the media URL when done; if the generation is " +
-      "still running after wait_seconds, returns the request_id so you can poll with check_status.",
+      "still running after wait_seconds, returns the request_id so you can poll with check_status. " +
+      "run_on 'auto' (default) generates locally when Imference Desktop is running and has the model " +
+      "downloaded (list_models shows `local`), else in the cloud; a local failure is reported, never " +
+      "silently retried as a paid cloud run.",
     inputSchema: {
+      run_on: z
+        .enum(["auto", "local", "cloud"])
+        .optional()
+        .describe(
+          "Where to generate: 'local' = Imference Desktop on this computer (free; the model must be " +
+            "downloaded in Desktop; LoRAs, batches and video knobs are cloud-only), 'cloud' = the " +
+            "Imference cloud (paid), 'auto' (default) = local when Desktop can, else cloud.",
+        ),
       rail: z
         .enum(["credits", "x402"])
         .optional()
@@ -378,7 +405,13 @@ server.registerTool(
               `Model code from list_models. Defaults to '${DEFAULT_MODEL}' (operator-configured) — ` +
                 "only pick a different model when the user asks for a specific style or for video.",
             )
-        : z.string().describe("Model code from list_models"),
+        : z
+            .string()
+            .optional()
+            .describe(
+              "Model code from list_models. Required in the cloud; locally, omitted = the model " +
+                "selected in Imference Desktop.",
+            ),
       prompt: z.string().describe("Text prompt describing the desired output"),
       negative_prompt: z.string().optional().describe("What to avoid (model default if omitted)"),
       format_code: z
@@ -407,9 +440,11 @@ server.registerTool(
       scheduler: z.string().optional().describe("Sampler/scheduler (model default if omitted)"),
       img_url: z
         .string()
-        .url()
         .optional()
-        .describe("Source image URL — for img2img on image models, or image-to-video on video models"),
+        .describe(
+          "Source image — for img2img on image models, or image-to-video on video models. An https " +
+            "URL; local runs also take a file path (e.g. a previous local output) or a data: URI.",
+        ),
       loras: z
         .array(
           z.object({
@@ -455,10 +490,22 @@ server.registerTool(
     },
   },
   async (args) => {
-    const { wait_seconds, rail: requestedRail, include_image, ...rest } = args;
+    const { wait_seconds, rail: requestedRail, include_image, run_on, ...rest } = args;
     const payload = rest as GeneratePayload;
     try {
       payload.model = payload.model || DEFAULT_MODEL || "";
+      // An explicit rail asks for the cloud.
+      const plan = await planGenerate(toolsCtx, run_on ?? (requestedRail ? "cloud" : "auto"), payload, payload.model || undefined);
+      if (plan.where === "local") return await runLocalGenerate(toolsCtx, plan, { include_image });
+      const routeNote = plan.note;
+      if (payload.img_url && !isRemoteUrl(payload.img_url)) {
+        return fail(
+          new ImferenceError(
+            "img_url must be an http(s) URL in the cloud — a local file or data: URI only works with " +
+              "run_on: 'local' (Imference Desktop).",
+          ),
+        );
+      }
       if (!payload.model) {
         return fail(
           new ImferenceError(
@@ -515,7 +562,7 @@ server.registerTool(
       if (status.state === "done") {
         const preview = include_image === false ? [] : await imagePreview(status.media);
         return ok(
-          { status: "done", rail, payment, loras: payload.loras, ...mediaSummary(status.media) },
+          { status: "done", ran: "cloud", note: routeNote, rail, payment, loras: payload.loras, ...mediaSummary(status.media) },
           preview,
         );
       }
@@ -524,10 +571,12 @@ server.registerTool(
         status: "pending",
         request_id,
         kind,
+        ran: "cloud",
         rail,
         payment,
         loras: payload.loras,
         note:
+          (routeNote ? `${routeNote} ` : "") +
           `Generation still running after ${waitMs / 1000}s. ` +
           `Poll it with the check_status tool (request_id: ${request_id}).`,
       });

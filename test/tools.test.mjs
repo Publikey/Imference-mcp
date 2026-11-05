@@ -6,7 +6,7 @@ import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { ImferenceClient } from "../dist/client.js";
 import { bundledCatalog, loadCatalog, normalizeTools } from "../dist/catalog.js";
 import { DesktopClient, discoveryFilePath, userConfigDir } from "../dist/desktop.js";
+import { localAvailability, planGenerate, runLocalGenerate } from "../dist/generate.js";
 import {
   buildMcpTool,
   coerceParam,
@@ -918,7 +919,8 @@ test("stdio: tools/list exposes the editing tools (bundled catalog)", async () =
     { jsonrpc: "2.0", id: 2, method: "tools/list" },
     { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "upscale", arguments: { image: "https://x/a.png", scale: 3 } } },
   ]);
-  assert.equal(lines.find((l) => l.id === 1).result.serverInfo.version, "0.4.0");
+  const pkgVersion = JSON.parse(await readFile(join(ROOT, "package.json"), "utf8")).version;
+  assert.equal(lines.find((l) => l.id === 1).result.serverInfo.version, pkgVersion);
   const names = lines.find((l) => l.id === 2).result.tools.map((t) => t.name);
   for (const n of ["generate", "list_tools", "remove_background", "upscale", "describe_image", "outpaint", "edit_with_instructions"]) {
     assert.ok(names.includes(n), `missing ${n}`);
@@ -976,4 +978,131 @@ test("stdio: list_models / get_model flag instruction-edit models", async () => 
   assert.equal(generation.models[0].edit_model, undefined);
   const got = JSON.parse(lines.find((l) => l.id === 3).result.content[0].text);
   assert.equal(got.edit_model.tool, "edit_with_instructions");
+});
+
+// ---------------------------------------------------------------------------
+// generate: local route through Imference Desktop (run_on)
+// ---------------------------------------------------------------------------
+
+function desktopGen({ models = [{ code: "anima", cached: true, active: true }, { code: "flux", cached: false }], reason, generate } = {}) {
+  desktopTools();
+  desk.routes["GET /v1/generation"] = (_req, res) =>
+    json(res, 200, { ready: !reason, engine_state: "ready", model: models.find((m) => m.active) ?? null, models, reason });
+  if (generate) desk.routes["POST /v1/generate"] = generate;
+}
+
+test("generate local: Desktop runs it with the model's defaults, free, preview from the file", async () => {
+  const outPath = await tempFile("gen-out.png", PNG);
+  const src = await tempFile("gen src.png", PNG);
+  desktopGen({
+    generate: (_req, res) =>
+      json(res, 200, { model: "anima", seed: 4242, duration_ms: 3100,
+        outputs: [{ name: "image", type: "image", format: "png", path: outPath, width: 832, height: 1216 }] }),
+  });
+  const c = { ...ctx({ apiKey: "k", desktop: desktopUp() }), cwd: tmp };
+  const plan = await planGenerate(c, "auto", { prompt: "a fox", format_code: "portrait", seed: 7, img_url: "gen src.png" }, "anima");
+  assert.equal(plan.where, "local");
+  const r = await runLocalGenerate(c, plan);
+  assert.equal(r.isError, undefined, r.content[0].text);
+  const post = desk.requests.find((q) => q.method === "POST" && q.path === "/v1/generate");
+  assert.equal(post.headers.authorization, "Bearer dtok");
+  assert.deepEqual(JSON.parse(post.body), { model: "anima", prompt: "a fox", format_code: "portrait", seed: 7, source_image: src });
+  const out = resultJson(r);
+  assert.equal(out.ran, "local");
+  assert.equal(out.credits, 0);
+  assert.equal(out.seed, 4242);
+  assert.equal(out.path, outPath);
+  assert.deepEqual(out.outputs[0], { name: "image", type: "image", format: "png", path: outPath, width: 832, height: 1216 });
+  assert.equal(r.content[1].type, "image");
+  assert.equal(api.requests.length, 0); // nothing touched the cloud
+});
+
+test("generate local: no model → Desktop's selected model", async () => {
+  desktopGen();
+  const plan = await planGenerate(ctx({ desktop: desktopUp() }), "local", { prompt: "x" }, undefined);
+  assert.equal(plan.where, "local");
+  assert.equal(plan.body.model, undefined);
+});
+
+test("generate auto: Desktop down → cloud, silently (as before Desktop)", async () => {
+  const plan = await planGenerate(ctx({ apiKey: "k" }), "auto", { prompt: "x" }, "anima");
+  assert.deepEqual(plan, { where: "cloud" });
+});
+
+test("generate auto: Desktop can't run THIS request → cloud with the reason", async () => {
+  desktopGen();
+  let plan = await planGenerate(ctx({ desktop: desktopUp() }), "auto", { prompt: "x" }, "flux");
+  assert.equal(plan.where, "cloud");
+  assert.match(plan.note, /'flux' isn't downloaded/);
+
+  plan = await planGenerate(ctx({ desktop: desktopUp() }), "auto", { prompt: "x" }, "sdxl");
+  assert.match(plan.note, /isn't a local model/);
+
+  plan = await planGenerate(ctx({ desktop: desktopUp() }), "auto", { prompt: "x", loras: [{ code: "l" }] }, "anima");
+  assert.match(plan.note, /LoRAs are cloud-only/);
+
+  desktopGen({ reason: "engine_not_installed" });
+  plan = await planGenerate(ctx({ desktop: desktopUp() }), "auto", { prompt: "x" }, "anima");
+  assert.match(plan.note, /local engine isn't installed/);
+
+  // A Desktop without /v1/generation (older version).
+  desk.routes = {};
+  desktopTools();
+  plan = await planGenerate(ctx({ desktop: desktopUp() }), "auto", { prompt: "x" }, "anima");
+  assert.match(plan.note, /update the app/);
+  assert.ok(!desk.requests.some((q) => q.method === "POST"));
+});
+
+test("generate run_on local: never the cloud — errors with codes", async () => {
+  await assert.rejects(planGenerate(ctx({ apiKey: "k" }), "local", { prompt: "x" }, "anima"), (e) => e.code === "desktop_unavailable");
+  desktopGen();
+  await assert.rejects(planGenerate(ctx({ desktop: desktopUp() }), "local", { prompt: "x" }, "flux"),
+    (e) => e.code === "model_not_cached" && /Download it in Imference Desktop/.test(e.message));
+  await assert.rejects(planGenerate(ctx({ desktop: desktopUp() }), "local", { prompt: "x", batch_nbr: 2 }, "anima"),
+    (e) => e.code === "not_available");
+  assert.equal(api.requests.length, 0);
+});
+
+test("generate auto: a local failure is reported with run_on cloud — no paid retry", async () => {
+  desktopGen({ generate: (_req, res) => json(res, 500, { error: { code: "oom", message: "CUDA out of memory" } }) });
+  const c = ctx({ apiKey: "k", desktop: desktopUp() });
+  const plan = await planGenerate(c, "auto", { prompt: "x" }, "anima");
+  await assert.rejects(runLocalGenerate(c, plan), (e) => e.code === "oom" && /run_on: 'cloud'/.test(e.message) && /CUDA/.test(e.message));
+  assert.equal(api.requests.length, 0);
+});
+
+test("localAvailability: ready / not_downloaded, nothing without the engine", () => {
+  const info = { models: [{ code: "a", cached: true }, { code: "b", cached: false }, { code: "c", active: true }] };
+  assert.deepEqual([...localAvailability(info)], [["a", "ready"], ["b", "not_downloaded"], ["c", "ready"]]);
+  assert.equal(localAvailability({ ...info, reason: "engine_not_installed" }).size, 0);
+  assert.equal(localAvailability(undefined).size, 0);
+});
+
+test("stdio: generate runs locally in Desktop; list_models flags local models", async () => {
+  const outPath = await tempFile("stdio-gen.png", PNG);
+  desktopGen({
+    generate: (_req, res) => json(res, 200, { model: "anima", seed: 1, outputs: [{ type: "image", format: "png", path: outPath }] }),
+  });
+  api.routes["/api/models"] = (_req, res) =>
+    json(res, 200, { models: [
+      { model_code: "anima", name: "Anima", im_cost: 20, im_engine: "sdxl", model_type: "image" },
+      { model_code: "flux", name: "Flux", im_cost: 50, im_engine: "flux", model_type: "image" },
+    ] });
+  const lines = await rpc(
+    { IMFERENCE_BASE_URL: api.url, IMFERENCE_TOOLS_CATALOG: "bundled", IMFERENCE_DESKTOP_URL: desk.url, IMFERENCE_DESKTOP_TOKEN: "dtok" },
+    [
+      ...INIT,
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "generate", arguments: { model: "anima", prompt: "a fox", include_image: false } } },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "list_models", arguments: {} } },
+      { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "generate", arguments: { model: "flux", prompt: "x", img_url: "C:/a.png", run_on: "cloud" } } },
+    ],
+  );
+  const gen = lines.find((l) => l.id === 2).result;
+  assert.equal(gen.isError, undefined, gen.content[0].text);
+  assert.equal(JSON.parse(gen.content[0].text).ran, "local");
+  const listed = JSON.parse(lines.find((l) => l.id === 3).result.content[0].text);
+  assert.deepEqual(listed.models.map((m) => [m.model_code, m.local]), [["anima", "ready"], ["flux", "not_downloaded"]]);
+  const cloudPath = lines.find((l) => l.id === 4).result;
+  assert.equal(cloudPath.isError, true);
+  assert.match(cloudPath.content[0].text, /http\(s\) URL in the cloud/);
 });
