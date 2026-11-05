@@ -41,6 +41,7 @@ import {
   type DesktopProbe,
   type DesktopRunResult,
 } from "./desktop.js";
+import { LOCAL_WAIT_DEFAULT_S, park, pendingResult, within } from "./local-jobs.js";
 import {
   fail,
   MIME_BY_FORMAT,
@@ -70,7 +71,8 @@ export function resolveRail(client: ImferenceClient, requested?: Rail): Rail {
         "rail 'credits' requested but IMFERENCE_API_KEY is not set. " +
           (client.hasWallet
             ? "Either set an API key, use rail 'x402', or buy a key with buy_credits_with_wallet."
-            : "Set IMFERENCE_API_KEY (get one at https://imference.com)."),
+            : "Set IMFERENCE_API_KEY (get one at https://imference.com).") +
+          (client.missingKeyHint ? ` ${client.missingKeyHint}` : ""),
       );
     }
     return "credits";
@@ -88,7 +90,8 @@ export function resolveRail(client: ImferenceClient, requested?: Rail): Rail {
   if (client.hasWallet) return "x402";
   throw new ImferenceError(
     "No payment method configured. Set IMFERENCE_API_KEY (credits rail) and/or " +
-      "IMFERENCE_WALLET_PRIVATE_KEY (x402 rail, USDC on Base).",
+      "IMFERENCE_WALLET_PRIVATE_KEY (x402 rail, USDC on Base)." +
+      (client.missingKeyHint ? ` ${client.missingKeyHint}` : ""),
   );
 }
 
@@ -673,7 +676,7 @@ export function buildMcpTool(tool: CatalogTool, env: NodeJS.ProcessEnv = process
       .optional()
       .describe(
         "Cloud runs: how long to wait for the result before returning the request_id for " +
-          "check_status (default 120, 0 = return immediately). Local runs always wait.",
+          "check_status (default 50, 0 = return immediately; local runs too).",
       );
     shape.rail = z
       .enum(["credits", "x402"])
@@ -927,9 +930,28 @@ async function runLocal(
   endpoint: DesktopEndpoint,
   prepared: PreparedInputs,
   params: Record<string, unknown>,
-  control: { include_image?: boolean },
+  control: { include_image?: boolean; wait_seconds?: number },
 ): Promise<ToolResult> {
-  const res: DesktopRunResult = await ctx.desktop.run(endpoint, tool.id, inputsPayload(prepared), params);
+  // Awaited for at most wait_seconds (MCP clients give up on a call after
+  // ~60 s); a longer run is parked and picked up by check_status. A failure
+  // within the wait throws (runEditTool may retry it in the cloud).
+  const work = (async () => localResult(ctx, tool, params, control, await ctx.desktop.run(endpoint, tool.id, inputsPayload(prepared), params)))();
+  const waitS = control.wait_seconds ?? LOCAL_WAIT_DEFAULT_S;
+  const done = await within(work, waitS * 1000);
+  if (done) return done.value;
+  const outcome = work.catch((e) => {
+    throw e instanceof DesktopError ? new ToolRunError(e.code, `local run failed: ${e.message}`) : e;
+  });
+  return pendingResult(park(outcome, tool.mcp_name), tool.mcp_name, waitS, { tool: tool.mcp_name, tool_id: tool.id });
+}
+
+async function localResult(
+  ctx: ToolsContext,
+  tool: CatalogTool,
+  params: Record<string, unknown>,
+  control: { include_image?: boolean },
+  res: DesktopRunResult,
+): Promise<ToolResult> {
   const outputs: OutputSummary[] = res.outputs.map((o) =>
     compact({
       name: str(o.name),
@@ -949,6 +971,7 @@ async function runLocal(
       tool: tool.mcp_name,
       tool_id: tool.id,
       ran: "local",
+      where: "this computer, in Imference Desktop — free, nothing sent to the cloud",
       request_id: "local",
       outputs,
       text: texts.length ? texts.join("\n\n") : undefined,
@@ -1023,7 +1046,7 @@ async function runCloud(
     uploaded: prepared.hasLocalFiles ? "local files uploaded (multipart)" : undefined,
   };
 
-  const waitMs = (control.wait_seconds ?? 120) * 1000;
+  const waitMs = (control.wait_seconds ?? LOCAL_WAIT_DEFAULT_S) * 1000;
   const status = await waitForStatus(ctx.client, request_id, waitMs, ctx.poll);
   if (status.state === "failed") {
     const prefix = routing.note ? `${routing.note}; then the cloud run failed: ` : "";

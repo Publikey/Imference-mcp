@@ -20,10 +20,12 @@
     "dist"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=20.10"
   },
   "scripts": {
-    "build": "tsc && node -e \"const fs=require('fs');fs.copyFileSync('src/tools-catalog.json','dist/tools-catalog.json');fs.chmodSync('dist/index.js',0o755)\"",
+    "build": "tsc && node -e \"require('fs').chmodSync('dist/index.js',0o755)\"",
+    "bundle": "npm run build && esbuild dist/index.js --bundle --platform=node --format=esm --target=node20 --outfile=release/imference-mcp.js --banner:js=\"import { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);\"",
+    "version": "node scripts/sync-version.mjs && git add src/version.ts",
     "prepublishOnly": "npm test",
     "start": "node dist/index.js",
     "dev": "tsc --watch",
@@ -52,6 +54,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "esbuild": "^0.28.2",
     "typescript": "^5.6.0"
   }
 }

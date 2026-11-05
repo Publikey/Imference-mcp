@@ -325,6 +325,18 @@ export class ImferenceClient {
     return !!this.config.apiKey;
   }
 
+  /**
+   * Swap the credits key at runtime (the key Imference Desktop hands out).
+   * missingHint is appended to "no API key" errors, saying how to get one.
+   */
+  setApiKey(key: string | undefined, missingHint?: string): void {
+    this.config.apiKey = key || undefined;
+    this.missingKeyHint = missingHint;
+  }
+
+  /** Why there's no key and how to get one (set with setApiKey). */
+  missingKeyHint?: string;
+
   get hasWallet(): boolean {
     return !!this.config.walletPrivateKey;
   }
@@ -432,7 +444,8 @@ export class ImferenceClient {
       if (!this.config.apiKey) {
         throw new ImferenceError(
           "IMFERENCE_API_KEY is not set. This tool requires an Imference API key " +
-            "(get one and add credits at https://imference.com).",
+            "(get one and add credits at https://imference.com)." +
+            (this.missingKeyHint ? ` ${this.missingKeyHint}` : ""),
         );
       }
       h["Authorization"] = `Bearer ${this.config.apiKey}`;

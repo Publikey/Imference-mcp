@@ -12,6 +12,10 @@
 #   - the package is published with provenance: npm shows a verified link from the
 #     package back to this exact commit and workflow run.
 #
+# The GitHub release also carries imference-mcp.js (the whole server in one
+# file, esbuild, run with plain Node) and SHA256SUMS: Imference Desktop
+# downloads it on demand ("Connect to Claude") and checks the hash.
+#
 # Auth is npm Trusted Publishing (OIDC) — no token, no secret. Configured on
 # npmjs.com (package Settings → Trusted Publisher): repo Publikey/Imference-mcp,
 # workflow release.yml, environment "npm". Requires npm >= 11.5, hence the
@@ -64,10 +68,20 @@ jobs:
       - name: Publish to npm
         run: npm publish --provenance --access public
 
+      - name: Build the single-file bundle
+        run: |
+          npm run bundle
+          cd release
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
+            | IMFERENCE_TOOLS_CATALOG=bundled node imference-mcp.js | grep -q "\"version\":\"${GITHUB_REF_NAME#v}\""
+          sha256sum imference-mcp.js > SHA256SUMS
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
-            --generate-notes
+            --generate-notes \
+            release/imference-mcp.js release/SHA256SUMS

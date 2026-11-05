@@ -3,7 +3,8 @@
  * imference-mcp — MCP server (stdio) wrapping the Imference generation API.
  *
  * Environment:
- *   IMFERENCE_API_KEY              Bearer key for the credits rail
+ *   IMFERENCE_API_KEY              Bearer key for the credits rail (unset: the key of the
+ *                                  Imference Desktop account, when Desktop lets agents use it)
  *   IMFERENCE_WALLET_PRIVATE_KEY   EVM private key (USDC on Base) for the x402 rail
  *   IMFERENCE_X402_MAX_USD         hard cap per x402 payment (default 10; enforced
  *                                  server-side, whatever the tool call asks for)
@@ -42,6 +43,10 @@ import {
 } from "./client.js";
 import { loadCatalog, type Catalog } from "./catalog.js";
 import { DesktopClient } from "./desktop.js";
+import { VERSION } from "./version.js";
+import { isRemoteUrl, localAvailability, planGenerate, runLocalGenerate } from "./generate.js";
+import { checkLocal, isLocalRequestId, LOCAL_WAIT_DEFAULT_S } from "./local-jobs.js";
+import { reportCloudEnd, reportCloudStart } from "./agent-report.js";
 import { fail, ok, previewFromUrl, type ContentBlock } from "./results.js";
 import {
   buildMcpTool,
@@ -80,8 +85,67 @@ const DEFAULT_MODEL = process.env.IMFERENCE_DEFAULT_MODEL;
 
 const server = new McpServer({
   name: "imference",
-  version: "0.4.0",
+  version: VERSION,
 });
+
+// ---------------------------------------------------------------------------
+// The credits key: IMFERENCE_API_KEY, else the Imference Desktop account's
+// key — asked from Desktop before each tool call (cached a few seconds), so a
+// key added in Desktop, or the permission turned off, applies at once.
+// ---------------------------------------------------------------------------
+
+const ENV_API_KEY = process.env.IMFERENCE_API_KEY || undefined;
+let keySource: "env" | "desktop" | "none" = ENV_API_KEY ? "env" : "none";
+let keySyncedAt = 0;
+let keySync: Promise<void> | undefined;
+const KEY_SYNC_MS = 5000;
+
+/** Parallel tool calls share one lookup (and all wait for it). */
+function syncDesktopKey(): Promise<void> {
+  if (ENV_API_KEY) return Promise.resolve();
+  if (keySync && Date.now() - keySyncedAt < KEY_SYNC_MS) return keySync;
+  keySyncedAt = Date.now();
+  keySync = lookupDesktopKey().catch(() => {
+    client.setApiKey(undefined);
+    keySource = "none";
+  });
+  return keySync;
+}
+
+async function lookupDesktopKey(): Promise<void> {
+  const ep = await desktop.endpoint();
+  if ("error" in ep) {
+    client.setApiKey(undefined);
+    keySource = "none";
+    return;
+  }
+  const c = await desktop.cloudCredentials(ep);
+  client.setApiKey(
+    c.api_key,
+    c.code === "not_allowed"
+      ? "Or let this server use the Imference Desktop account: in Imference Desktop, turn on Settings › AI agents › " +
+          "Let AI agents spend my credits (the user must do it)."
+      : c.code === "no_api_key"
+        ? "Imference Desktop has no Imference account yet: the user can buy credits in it (Settings › Credits & account)."
+        : undefined,
+  );
+  keySource = c.api_key ? "desktop" : "none";
+}
+
+/** server.registerTool, refreshing the Desktop key before each call. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const registerTool = ((name: string, config: any, cb: (...a: any[]) => any) =>
+  server.registerTool(name, config, async (...a: unknown[]) => {
+    await syncDesktopKey();
+    return cb(...a);
+  })) as typeof server.registerTool;
+
+/** Desktop's local models (empty when Desktop isn't running). Never throws. */
+async function localModels() {
+  const probe = await desktop.probe();
+  if (!probe.reachable) return localAvailability(undefined);
+  return localAvailability(await desktop.generationInfo(probe.endpoint));
+}
 
 function mediaSummary(m: MediaRow) {
   return {
@@ -108,7 +172,7 @@ async function imagePreview(media: MediaRow): Promise<ContentBlock[]> {
 // Catalog tools (no API key required)
 // ---------------------------------------------------------------------------
 
-server.registerTool(
+registerTool(
   "list_models",
   {
     title: "List Imference models",
@@ -129,7 +193,7 @@ server.registerTool(
   },
   async ({ kind }) => {
     try {
-      const models = await client.listModels();
+      const [models, local] = await Promise.all([client.listModels(), localModels()]);
       const rows = models
         .map((m) => ({
           model_code: m.model_code,
@@ -151,6 +215,8 @@ server.registerTool(
           // Instruction-edit models are used through edit_with_instructions.
           edit_model: isEditModel(m) ? true : undefined,
           max_duration_s: m.duration_s_max ?? undefined,
+          // Imference Desktop on this computer: ready = generate with run_on local (free).
+          local: local.get(m.model_code),
         }))
         .filter((m) => (kind ? kind === "all" || m.kind === kind : m.kind !== "image-edit"));
       return ok({
@@ -160,7 +226,11 @@ server.registerTool(
           "Call get_model with a model_code for full details (parameters, bounds, formats, prompting tips). " +
           "Instruction-edit models (kind image-edit, list them with kind: \"image-edit\") edit an existing " +
           "image from a plain-words instruction: use them with the edit_with_instructions tool (its `model`), " +
-          "never with generate.",
+          "never with generate." +
+          (local.size
+            ? " `local: ready` = Imference Desktop runs it on this computer for free (generate's default " +
+              "run_on 'auto' uses it); `not_downloaded` = download it in Desktop first."
+            : ""),
       });
     } catch (e) {
       return fail(e);
@@ -168,7 +238,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "get_model",
   {
     title: "Get full details of one model",
@@ -255,7 +325,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "list_formats",
   {
     title: "List model formats",
@@ -285,7 +355,7 @@ const LORA_OPT_IN =
   "on your own initiative to 'improve' an image — if one looks relevant, SUGGEST it to the " +
   "user and wait for their go-ahead.";
 
-server.registerTool(
+registerTool(
   "list_loras",
   {
     title: "List curated LoRAs",
@@ -348,12 +418,13 @@ function resolveRail(requested?: "credits" | "x402"): "credits" | "x402" {
   return resolveRailFor(client, requested);
 }
 
-server.registerTool(
+registerTool(
   "generate",
   {
     title: "Generate an image or video",
     description:
-      "Submit a generation request to Imference and wait for the result. The media kind (image " +
+      "Generate an image or video and wait for the result — on this computer's GPU with Imference " +
+      "Desktop (free, run_on), or in the Imference cloud. The media kind (image " +
       "or video) is determined by the model — use list_models to pick a model_code, and " +
       "get_model to learn how to prompt it and which parameters it accepts. Size and " +
       "aspect ratio are chosen with format_code (a predefined format from list_formats), never " +
@@ -361,8 +432,20 @@ server.registerTool(
       "either the credits rail (API key balance) or the x402 rail (pay-per-generation in USDC " +
       "on Base, signed with the configured wallet); defaults to credits when an API key is set, " +
       "else x402 when a wallet is set. Returns the media URL when done; if the generation is " +
-      "still running after wait_seconds, returns the request_id so you can poll with check_status.",
+      "still running after wait_seconds, returns the request_id so you can poll with check_status. " +
+      "run_on 'auto' (default) generates locally when Imference Desktop is running and has the model " +
+      "downloaded (list_models shows `local`), else in the cloud; a local failure is reported, never " +
+      "silently retried as a paid cloud run. The result's `ran` says where it ran: always tell the " +
+      "user (local = on their computer, free; cloud = paid, with the credits spent).",
     inputSchema: {
+      run_on: z
+        .enum(["auto", "local", "cloud"])
+        .optional()
+        .describe(
+          "Where to generate: 'local' = Imference Desktop on this computer (free; the model must be " +
+            "downloaded in Desktop; LoRAs, batches and video knobs are cloud-only), 'cloud' = the " +
+            "Imference cloud (paid), 'auto' (default) = local when Desktop can, else cloud.",
+        ),
       rail: z
         .enum(["credits", "x402"])
         .optional()
@@ -378,7 +461,13 @@ server.registerTool(
               `Model code from list_models. Defaults to '${DEFAULT_MODEL}' (operator-configured) — ` +
                 "only pick a different model when the user asks for a specific style or for video.",
             )
-        : z.string().describe("Model code from list_models"),
+        : z
+            .string()
+            .optional()
+            .describe(
+              "Model code from list_models. Required in the cloud; locally, omitted = the model " +
+                "selected in Imference Desktop.",
+            ),
       prompt: z.string().describe("Text prompt describing the desired output"),
       negative_prompt: z.string().optional().describe("What to avoid (model default if omitted)"),
       format_code: z
@@ -407,9 +496,11 @@ server.registerTool(
       scheduler: z.string().optional().describe("Sampler/scheduler (model default if omitted)"),
       img_url: z
         .string()
-        .url()
         .optional()
-        .describe("Source image URL — for img2img on image models, or image-to-video on video models"),
+        .describe(
+          "Source image — for img2img on image models, or image-to-video on video models. An https " +
+            "URL; local runs also take a file path (e.g. a previous local output) or a data: URI.",
+        ),
       loras: z
         .array(
           z.object({
@@ -444,7 +535,10 @@ server.registerTool(
         .min(0)
         .max(600)
         .optional()
-        .describe("How long to wait for completion before returning the request_id (default 120, 0 = return immediately)"),
+        .describe(
+          "How long to wait for completion before returning the request_id to poll with " +
+            "check_status (default 50 — MCP clients give up on a tool call after ~60s; 0 = return immediately)",
+        ),
       include_image: z
         .boolean()
         .optional()
@@ -455,10 +549,22 @@ server.registerTool(
     },
   },
   async (args) => {
-    const { wait_seconds, rail: requestedRail, include_image, ...rest } = args;
+    const { wait_seconds, rail: requestedRail, include_image, run_on, ...rest } = args;
     const payload = rest as GeneratePayload;
     try {
       payload.model = payload.model || DEFAULT_MODEL || "";
+      // An explicit rail asks for the cloud.
+      const plan = await planGenerate(toolsCtx, run_on ?? (requestedRail ? "cloud" : "auto"), payload, payload.model || undefined);
+      if (plan.where === "local") return await runLocalGenerate(toolsCtx, plan, { include_image, wait_seconds });
+      const routeNote = plan.note;
+      if (payload.img_url && !isRemoteUrl(payload.img_url)) {
+        return fail(
+          new ImferenceError(
+            "img_url must be an http(s) URL in the cloud — a local file or data: URI only works with " +
+              "run_on: 'local' (Imference Desktop).",
+          ),
+        );
+      }
       if (!payload.model) {
         return fail(
           new ImferenceError(
@@ -507,15 +613,28 @@ server.registerTool(
         kind = res.kind;
       }
 
-      const waitMs = (wait_seconds ?? 120) * 1000;
+      const waitMs = (wait_seconds ?? LOCAL_WAIT_DEFAULT_S) * 1000;
+      // Shown in Imference Desktop too (Activity, then the gallery) when it runs.
+      await reportCloudStart(desktop, request_id, payload.prompt, payload.model);
       const status = await waitForStatus(client, request_id, waitMs);
       if (status.state === "failed") {
+        await reportCloudEnd(desktop, request_id, "error", status.error);
         return fail(new ImferenceError(status.error, undefined, status.code));
       }
       if (status.state === "done") {
+        await reportCloudEnd(desktop, request_id, "done");
         const preview = include_image === false ? [] : await imagePreview(status.media);
         return ok(
-          { status: "done", rail, payment, loras: payload.loras, ...mediaSummary(status.media) },
+          {
+            status: "done",
+            ran: "cloud",
+            where: "the Imference cloud (paid)",
+            note: routeNote,
+            rail,
+            payment,
+            loras: payload.loras,
+            ...mediaSummary(status.media),
+          },
           preview,
         );
       }
@@ -524,10 +643,12 @@ server.registerTool(
         status: "pending",
         request_id,
         kind,
+        ran: "cloud",
         rail,
         payment,
         loras: payload.loras,
         note:
+          (routeNote ? `${routeNote} ` : "") +
           `Generation still running after ${waitMs / 1000}s. ` +
           `Poll it with the check_status tool (request_id: ${request_id}).`,
       });
@@ -537,25 +658,39 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "check_status",
   {
     title: "Check a generation or tool request",
     description:
-      "Check the status of a previously submitted generation or cloud editing-tool run. Returns " +
+      "Check the status of a previously submitted generation or editing-tool run. Returns " +
       "the media URL (tools: every output, plus the text of describe_image) when done, 'pending' " +
-      "while still running, or the failure reason.",
+      "while still running, or the failure reason. A local run (request_id local_…, still running " +
+      "in Imference Desktop) is waited for up to wait_seconds, then its file path is returned.",
     inputSchema: {
       request_id: z.string().describe("The request_id returned by generate or an editing tool"),
+      wait_seconds: z
+        .number()
+        .int()
+        .min(0)
+        .max(600)
+        .optional()
+        .describe("Local runs (local_…): how long to wait for the end (default 50)"),
       include_image: z
         .boolean()
         .optional()
         .describe("Embed the finished image in the result (default true; images ≤ 3MB only)"),
     },
   },
-  async ({ request_id, include_image }) => {
+  async ({ request_id, include_image, wait_seconds }) => {
     try {
+      if (isLocalRequestId(request_id)) {
+        return await checkLocal(request_id, (wait_seconds ?? LOCAL_WAIT_DEFAULT_S) * 1000);
+      }
       const status = await client.status(request_id);
+      if (status.state !== "pending") {
+        await reportCloudEnd(desktop, request_id, status.state === "done" ? "done" : "error", status.state === "failed" ? status.error : undefined);
+      }
       if (status.state === "done") {
         if (isToolMedia(status.media)) {
           const summary = summarizeToolMedia(status.media);
@@ -573,7 +708,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "download_media",
   {
     title: "Download a generated media file",
@@ -616,7 +751,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "get_balance",
   {
     title: "Get credit balance",
@@ -635,7 +770,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "buy_credits_with_wallet",
   {
     title: "Buy credits with the wallet (x402)",
@@ -682,7 +817,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "payment_config",
   {
     title: "Show configured payment rails",
@@ -697,7 +832,11 @@ server.registerTool(
     const caps = client.spendingCaps;
     return ok({
       base_url: process.env.IMFERENCE_BASE_URL ?? "https://imference.com",
-      credits_rail: client.hasApiKey ? "configured (IMFERENCE_API_KEY set)" : "not configured",
+      credits_rail: client.hasApiKey
+        ? keySource === "desktop"
+          ? "configured (the Imference Desktop account — allowed in Desktop's Settings › AI agents)"
+          : "configured (IMFERENCE_API_KEY set)"
+        : "not configured" + (client.missingKeyHint ? ` — ${client.missingKeyHint}` : ""),
       x402_rail: client.hasWallet
         ? {
             status: "configured",
@@ -715,7 +854,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "wallet_balance",
   {
     title: "Get wallet USDC balance",
@@ -735,7 +874,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "list_media",
   {
     title: "List generated media",
@@ -756,7 +895,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   "list_history",
   {
     title: "List call history",
@@ -791,11 +930,12 @@ server.registerTool(
 // Editing tools (one MCP tool per catalog entry) + list_tools
 // ---------------------------------------------------------------------------
 
-const desktop = new DesktopClient();
+// Desktop labels the runs it starts for us with the client's name ("via Claude").
+const desktop = new DesktopClient({ agentName: () => server.server.getClientVersion()?.name });
 const toolsCtx: ToolsContext = { client, desktop };
 
 function registerEditingTools(catalog: Catalog): void {
-  server.registerTool(
+  registerTool(
     "list_tools",
     {
       title: "List editing tools",
@@ -838,7 +978,7 @@ function registerEditingTools(catalog: Catalog): void {
       continue;
     }
     taken.add(def.name);
-    server.registerTool(
+    registerTool(
       def.name,
       { title: def.title, description: def.description, inputSchema: def.inputSchema },
       async (args: unknown) => runEditTool(toolsCtx, def, (args ?? {}) as Record<string, unknown>),
