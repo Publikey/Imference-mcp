@@ -1,7 +1,7 @@
 /**
  * Thin HTTP client for the Imference API (https://imference.com/docs).
  *
- * Credits rail (Bearer API key):
+ * Credits rail (Bearer Imference key, IMFERENCE_API_KEY):
  *   GET  /api/models          public model catalog
  *   GET  /api/formats         per-model formats (resolution/ratio)
  *   POST /generate            submit a generation (image or video, model-driven)
@@ -327,11 +327,16 @@ export class ImferenceClient {
 
   /**
    * Swap the credits key at runtime (the key Imference Desktop hands out).
-   * missingHint is appended to "no API key" errors, saying how to get one.
+   * missingHint is appended to "no Imference key" errors, saying how to get one.
    */
   setApiKey(key: string | undefined, missingHint?: string): void {
     this.config.apiKey = key || undefined;
     this.missingKeyHint = missingHint;
+  }
+
+  /** The Imference key in use (env or Desktop's), for tools that target it. */
+  get apiKey(): string | undefined {
+    return this.config.apiKey;
   }
 
   /** Why there's no key and how to get one (set with setApiKey). */
@@ -443,8 +448,8 @@ export class ImferenceClient {
     if (auth) {
       if (!this.config.apiKey) {
         throw new ImferenceError(
-          "IMFERENCE_API_KEY is not set. This tool requires an Imference API key " +
-            "(get one and add credits at https://imference.com)." +
+          "IMFERENCE_API_KEY is not set. This tool requires an Imference key (it holds the credits). " +
+            "Get credits at https://imference.com/payments (lost your key? https://imference.com/key)." +
             (this.missingKeyHint ? ` ${this.missingKeyHint}` : ""),
         );
       }

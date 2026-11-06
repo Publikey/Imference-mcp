@@ -61,7 +61,7 @@ import {
 export type Rail = "credits" | "x402";
 
 /**
- * Picks the payment rail: explicit request wins, otherwise credits (API key)
+ * Picks the payment rail: explicit request wins, otherwise credits (Imference key)
  * when configured, otherwise x402 (wallet).
  */
 export function resolveRail(client: ImferenceClient, requested?: Rail): Rail {
@@ -70,8 +70,8 @@ export function resolveRail(client: ImferenceClient, requested?: Rail): Rail {
       throw new ImferenceError(
         "rail 'credits' requested but IMFERENCE_API_KEY is not set. " +
           (client.hasWallet
-            ? "Either set an API key, use rail 'x402', or buy a key with buy_credits_with_wallet."
-            : "Set IMFERENCE_API_KEY (get one at https://imference.com).") +
+            ? "Either set an Imference key (IMFERENCE_API_KEY), use rail 'x402', or buy a key with buy_credits_with_wallet."
+            : "Set IMFERENCE_API_KEY to an Imference key. Get credits at https://imference.com/payments (lost your key? https://imference.com/key).") +
           (client.missingKeyHint ? ` ${client.missingKeyHint}` : ""),
       );
     }
@@ -682,8 +682,8 @@ export function buildMcpTool(tool: CatalogTool, env: NodeJS.ProcessEnv = process
       .enum(["credits", "x402"])
       .optional()
       .describe(
-        "Cloud payment rail: 'credits' (API key balance) or 'x402' (per-run USDC payment on Base). " +
-          "Default: credits if an API key is configured, else x402.",
+        "Cloud payment rail: 'credits' (Imference key balance) or 'x402' (per-run USDC payment on Base). " +
+          "Default: credits if an Imference key is configured, else x402.",
       );
   }
   shape.include_image = z
