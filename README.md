@@ -96,7 +96,6 @@ recommended quality tags, pick a banner format, generate, and show the result.
 | `get_balance` | Remaining credits of the Imference key | Imference key |
 | `list_media` | Previously generated media, newest first | Imference key |
 | `list_history` | Past calls (status, rail, credits, outputs), newest first; output URLs for 24 h, to re-download with `download_media`. Prompts and settings are never stored | Imference key or wallet (signed in, no payment) |
-| `buy_credits_with_wallet` | Top up (or mint) an Imference key with one USDC payment | wallet |
 | `wallet_balance` | USDC balance of the configured wallet (read-only) | wallet |
 | `payment_config` | Which rails are configured, caps, session spend | – |
 | `list_tools` | Editing tools with prices, cloud/local availability, and whether Imference Desktop is running | – |
@@ -210,8 +209,9 @@ up to the request's catalog price (+ $0.01 headroom) — base cost scaled by the
 chosen format, clip duration and batch size, the same formula the API prices
 the challenge with — so a typo'd request can never overcharge.
 
-Generating a lot? `buy_credits_with_wallet` is cheaper: one on-chain payment
-tops up the Imference key in use (or mints a new one) instead of paying per generation.
+Generating a lot? Buy a credit pack for your Imference key, by card or in crypto
+(BTC, ETH, USDT, USDC and more), at [imference.com/payments](https://imference.com/payments):
+no per-generation network fee.
 
 ### Spending guards
 
@@ -232,7 +232,7 @@ guard runs **before** any signing or network call:
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `IMFERENCE_API_KEY` | credits rail | Your Imference key (buy credits at imference.com/payments or via `buy_credits_with_wallet`; lost it? imference.com/key) |
+| `IMFERENCE_API_KEY` | credits rail | Your Imference key (buy credits by card or crypto at imference.com/payments; lost it? imference.com/key) |
 | `IMFERENCE_WALLET_PRIVATE_KEY` | x402 rail | 0x-prefixed EVM private key holding USDC on Base mainnet |
 | `IMFERENCE_DEFAULT_MODEL` | – | Model used when `generate` is called without one — makes the bot's model choice deterministic |
 | `IMFERENCE_DEFAULT_EDIT_MODEL` | – | Model used when `edit_with_instructions` is called without one (default `qwen-image-edit-2511`) |

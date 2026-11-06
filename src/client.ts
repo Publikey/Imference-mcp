@@ -13,7 +13,6 @@
  *
  * x402 rail (USDC on Base, signed with a wallet private key, x402 v2):
  *   POST /ondemand/generate      pay-per-generation at the model's catalog price
- *   POST /ondemand/credits/add   prepay credits onto an API key (min 100, max 1M)
  *   POST /ondemand/tools/{id}    pay-per-run editing tool (price = tool credits × $0.001)
  *
  * Status polling uses GET /ondemand/status — the shared, unauthenticated status
@@ -279,9 +278,6 @@ export interface PaymentReceipt {
   payer?: string;
 }
 
-/** x402 credits top-up bounds (mirrors the API: min $0.10, max $1,000 per call). */
-export const MIN_X402_CREDITS_TOPUP = 100;
-export const MAX_X402_CREDITS_TOPUP = 1_000_000;
 
 /** 1 credit = $0.001 = 1000 atomic USDC units (6 decimals). */
 export function creditsToAtomicUsdc(credits: number): bigint {
@@ -407,7 +403,7 @@ export class ImferenceClient {
       schemes: [{ network: BASE_NETWORK, client: new ExactEvmScheme(account) }],
       policies: [(_version, reqs) => reqs.filter((r) => payableOffer(r, maxAtomic))],
       // The SDK's default cap is $1 per payment; ours is the price the spend
-      // guards just authorized (a credits top-up goes up to $1,000).
+      // guards just authorized (a video or a large batch can cost more).
       spendControls: { maxAmountPerPayment: atomicToUsd(maxAtomic) },
     });
     const pay = wrapFetchWithPayment(fetch, client);
@@ -596,28 +592,6 @@ export class ImferenceClient {
     if (!res.ok) throw new ImferenceError(await this.parseError(res), res.status);
     this.sessionSpentAtomic += priceAtomic;
     const body = (await res.json()) as { request_id: string; kind: string };
-    return { ...body, payment: this.receipt(res) };
-  }
-
-  /**
-   * Prepay credits onto an API key with one USDC payment (price = credits ×
-   * $0.001). An empty apiKey makes the server mint and return a fresh key.
-   */
-  async addCreditsX402(
-    credits: number,
-    apiKey?: string,
-  ): Promise<{ api_key: string; credits_added: number; payment?: PaymentReceipt }> {
-    const priceAtomic = creditsToAtomicUsdc(credits);
-    this.authorizeSpend(priceAtomic, `credits top-up of ${credits} credits`);
-    const payFetch = this.paymentFetch(priceAtomic + 10_000n);
-    const res = await payFetch(this.url("/ondemand/credits/add"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ credits, ...(apiKey ? { api_key: apiKey } : {}) }),
-    });
-    if (!res.ok) throw new ImferenceError(await this.parseError(res), res.status);
-    this.sessionSpentAtomic += priceAtomic;
-    const body = (await res.json()) as { api_key: string; credits_added: number };
     return { ...body, payment: this.receipt(res) };
   }
 
