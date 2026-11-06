@@ -1177,7 +1177,7 @@ test("editing tool local: a long run is parked too, never retried in the cloud",
 });
 
 // ---------------------------------------------------------------------------
-// Cloud runs with the Imference Desktop account's key
+// Cloud runs with Imference Desktop's Imference key
 // ---------------------------------------------------------------------------
 
 test("stdio: no IMFERENCE_API_KEY → cloud runs use the key Desktop hands out, and say so when it won't", async () => {
@@ -1202,7 +1202,7 @@ test("stdio: no IMFERENCE_API_KEY → cloud runs use the key Desktop hands out, 
   assert.equal(JSON.parse(done.content[0].text).ran, "cloud");
   const post = api.requests.find((q) => q.method === "POST" && q.path === "/generate");
   assert.equal(post.headers.authorization, "Bearer imf_from_desktop");
-  assert.match(JSON.parse(lines.find((l) => l.id === 3).result.content[0].text).credits_rail, /Imference Desktop account/);
+  assert.match(JSON.parse(lines.find((l) => l.id === 3).result.content[0].text).credits_rail, /Imference Desktop's Imference key/);
   // Desktop is told about the cloud run (its Activity + gallery): started, then done.
   const reports = desk.requests.filter((q) => q.path === "/v1/agent-runs").map((q) => JSON.parse(q.body));
   assert.deepEqual(reports.map((r) => [r.state, r.request_id, r.label, r.model]), [
@@ -1220,7 +1220,7 @@ test("stdio: no IMFERENCE_API_KEY → cloud runs use the key Desktop hands out, 
   assert.ok(!api.requests.some((q) => q.path === "/generate"));
 });
 
-test("stdio: IMFERENCE_API_KEY wins over Desktop's account", async () => {
+test("stdio: IMFERENCE_API_KEY wins over Desktop's key", async () => {
   desktopTools();
   desk.routes["GET /v1/cloud-credentials"] = (_req, res) => json(res, 200, { api_key: "imf_from_desktop" });
   api.routes["POST /generate"] = (_req, res) => json(res, 200, { request_id: "req-1", kind: "image" });
@@ -1232,4 +1232,46 @@ test("stdio: IMFERENCE_API_KEY wins over Desktop's account", async () => {
   );
   assert.equal(api.requests.find((q) => q.path === "/generate").headers.authorization, "Bearer imf_env");
   assert.ok(!desk.requests.some((q) => q.path === "/v1/cloud-credentials"));
+});
+
+test("stdio: buy_credits_with_wallet tops up Desktop's key, it doesn't mint a new one", async () => {
+  desktopTools();
+  desk.routes["GET /v1/cloud-credentials"] = (_req, res) => json(res, 200, { api_key: "imf_from_desktop" });
+  const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64");
+  api.routes["POST /ondemand/credits/add"] = (req, res, raw) => {
+    if (!req.headers["payment-signature"]) {
+      res.writeHead(402, {
+        "Content-Type": "application/json",
+        "PAYMENT-REQUIRED": b64({
+          x402Version: 2,
+          error: "Payment required",
+          resource: { url: api.url + "/ondemand/credits/add", description: "credits", mimeType: "application/json" },
+          accepts: [{
+            scheme: "exact", network: "eip155:8453", amount: "100000",
+            asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", payTo: "0x1111111111111111111111111111111111111111",
+            maxTimeoutSeconds: 60, extra: { name: "USD Coin", version: "2", paymentFlow: "upfront" },
+          }],
+        }),
+      });
+      res.end("{}");
+      return;
+    }
+    const body = JSON.parse(raw.toString("utf8"));
+    json(res, 200, { api_key: body.api_key || "imf_minted", credits_added: body.credits });
+  };
+  const lines = await rpc(
+    {
+      IMFERENCE_BASE_URL: api.url, IMFERENCE_TOOLS_CATALOG: "bundled", IMFERENCE_DESKTOP_URL: desk.url, IMFERENCE_DESKTOP_TOKEN: "dtok",
+      // Well-known Hardhat test key #0: public, never funded.
+      IMFERENCE_WALLET_PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+    },
+    [...INIT, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "buy_credits_with_wallet", arguments: { credits: 100 } } }],
+  );
+  const r = lines.find((l) => l.id === 2).result;
+  assert.equal(r.isError, undefined, r.content[0].text);
+  const out = JSON.parse(r.content[0].text);
+  assert.equal(out.api_key, "imf_from_desktop");
+  assert.equal(out.note, undefined);
+  const paid = api.requests.filter((q) => q.path === "/ondemand/credits/add").at(-1);
+  assert.equal(JSON.parse(paid.body).api_key, "imf_from_desktop");
 });

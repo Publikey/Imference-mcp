@@ -23,16 +23,17 @@ Works with any MCP client: Claude Code, Claude Desktop, Cursor, etc.
 - **Editing tools, local or cloud** — remove backgrounds, upscale, caption,
   edit with plain-words instructions, outpaint, crop, convert, trim and join videos. They run for free on
   your machine when Imference Desktop is open, in the cloud otherwise.
-- **Two payment rails** — a classic prepaid API key, or pay-per-generation in
-  USDC on Base ([x402](https://www.x402.org/)) straight from a wallet, with
-  hard spending caps enforced server-side.
+- **Two payment rails** — prepaid credits on an Imference key (no account, no
+  password: the key holds the credits), or pay-per-generation in USDC on Base
+  ([x402](https://www.x402.org/)) straight from a wallet, with hard spending
+  caps enforced server-side.
 
 ## Quickstart
 
 With Claude Code:
 
 ```bash
-claude mcp add imference -e IMFERENCE_API_KEY=your-api-key -- npx -y imference-mcp
+claude mcp add imference -e IMFERENCE_API_KEY=your-imference-key -- npx -y imference-mcp
 ```
 
 Or in a `mcpServers` config (Claude Desktop, etc.):
@@ -43,7 +44,7 @@ Or in a `mcpServers` config (Claude Desktop, etc.):
     "imference": {
       "command": "npx",
       "args": ["-y", "imference-mcp"],
-      "env": { "IMFERENCE_API_KEY": "your-api-key" }
+      "env": { "IMFERENCE_API_KEY": "your-imference-key" }
     }
   }
 }
@@ -57,13 +58,18 @@ Or in a `mcpServers` config (Claude Desktop, etc.):
 
 **With Imference Desktop** — Settings › AI agents › *Connect to Claude* sets
 all this up for you (no Node.js needed), and `generate` and the editing tools
-then run on your own GPU for free. See [Local generation](#local-generation-imference-desktop).
+then run on your own GPU for free. Without `IMFERENCE_API_KEY`, cloud runs use
+Desktop's own Imference key once you turn on Settings › AI agents › *Let AI
+agents spend my credits*. See [Local generation](#local-generation-imference-desktop).
 
 **Without npm** — each GitHub release carries `imference-mcp.js`, the whole
 server in one file (plus `SHA256SUMS`). Run it with Node.js ≥ 20.10:
 `"command": "node", "args": ["/path/to/imference-mcp.js"]`.
 
-Get an API key and credits at [imference.com](https://imference.com) — or skip
+Buy credits by card at [imference.com/payments](https://imference.com/payments):
+your first purchase creates your Imference key (add a recovery email right
+after, optional, to be able to [get it back](https://imference.com/key) if you
+lose it). Or skip
 the key entirely and pay per generation from a wallet (see
 [Payment rails](#payment-rails)). Generation costs start at 3 credits
 ($0.003) per image.
@@ -84,17 +90,17 @@ recommended quality tags, pick a banner format, generate, and show the result.
 | `get_model` | One model in full: description, prompting recommendations, exact parameters & bounds, formats & price multipliers | – |
 | `list_formats` | Predefined output formats per model (`square`, `portrait`, `landscape-wide`, …) | – |
 | `list_loras` | Curated LoRAs: category, compatible families, weight bounds, trigger words | – |
-| `generate` | Generate and wait — locally in Imference Desktop (free) or in the cloud; embeds the finished image in the result | API key or wallet (cloud), Imference Desktop (local) |
+| `generate` | Generate and wait — locally in Imference Desktop (free) or in the cloud; embeds the finished image in the result | Imference key or wallet (cloud), Imference Desktop (local) |
 | `check_status` | Poll a still-running generation | – |
 | `download_media` | Save an image or video to a local file | – |
-| `get_balance` | Remaining credits of the API key | API key |
-| `list_media` | Previously generated media, newest first | API key |
-| `list_history` | Past calls (status, rail, credits, outputs), newest first; output URLs for 24 h, to re-download with `download_media`. Prompts and settings are never stored | API key or wallet (signed in, no payment) |
-| `buy_credits_with_wallet` | Top up (or mint) an API key with one USDC payment | wallet |
+| `get_balance` | Remaining credits of the Imference key | Imference key |
+| `list_media` | Previously generated media, newest first | Imference key |
+| `list_history` | Past calls (status, rail, credits, outputs), newest first; output URLs for 24 h, to re-download with `download_media`. Prompts and settings are never stored | Imference key or wallet (signed in, no payment) |
+| `buy_credits_with_wallet` | Top up (or mint) an Imference key with one USDC payment | wallet |
 | `wallet_balance` | USDC balance of the configured wallet (read-only) | wallet |
 | `payment_config` | Which rails are configured, caps, session spend | – |
 | `list_tools` | Editing tools with prices, cloud/local availability, and whether Imference Desktop is running | – |
-| `remove_background`, `upscale`, `describe_image`, … | One tool per editing tool — see [Editing tools](#editing-tools) | API key or wallet (cloud), Imference Desktop (local) |
+| `remove_background`, `upscale`, `describe_image`, … | One tool per editing tool — see [Editing tools](#editing-tools) | Imference key or wallet (cloud), Imference Desktop (local) |
 
 Output size and aspect ratio are selected with `format_code` — a predefined
 format the API translates into dimensions and that carries the price
@@ -186,8 +192,9 @@ Errors carry the catalog code: `invalid_input` and `too_large` (never charged),
 
 ## Payment rails
 
-- **credits** — Bearer API key; each generation debits the model's catalog
-  cost from your balance. Set `IMFERENCE_API_KEY`.
+- **credits** — an Imference key (sent as a Bearer token); each generation
+  debits the model's catalog cost from its balance. Set `IMFERENCE_API_KEY`,
+  or let Imference Desktop share its key.
 - **x402** — pay-per-request in USDC on Base mainnet, no account needed. The
   server answers with an HTTP 402 challenge priced at the request's catalog
   cost; this MCP server signs an EIP-3009 `transferWithAuthorization` with the
@@ -197,14 +204,14 @@ Errors carry the catalog code: `invalid_input` and `too_large` (never charged),
   It only ever signs exact USDC on Base mainnet: an offer on another network
   or token, or above the authorized price, is refused, not paid.
 
-`generate` picks the rail automatically (credits if an API key is set, else
+`generate` picks the rail automatically (credits if an Imference key is set, else
 x402) — override per call with the `rail` argument. The wallet only ever signs
 up to the request's catalog price (+ $0.01 headroom) — base cost scaled by the
 chosen format, clip duration and batch size, the same formula the API prices
 the challenge with — so a typo'd request can never overcharge.
 
 Generating a lot? `buy_credits_with_wallet` is cheaper: one on-chain payment
-tops up an API key (or mints a new one) instead of paying per generation.
+tops up the Imference key in use (or mints a new one) instead of paying per generation.
 
 ### Spending guards
 
@@ -225,7 +232,7 @@ guard runs **before** any signing or network call:
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `IMFERENCE_API_KEY` | credits rail | Bearer API key (top up at imference.com or via `buy_credits_with_wallet`) |
+| `IMFERENCE_API_KEY` | credits rail | Your Imference key (buy credits at imference.com/payments or via `buy_credits_with_wallet`; lost it? imference.com/key) |
 | `IMFERENCE_WALLET_PRIVATE_KEY` | x402 rail | 0x-prefixed EVM private key holding USDC on Base mainnet |
 | `IMFERENCE_DEFAULT_MODEL` | – | Model used when `generate` is called without one — makes the bot's model choice deterministic |
 | `IMFERENCE_DEFAULT_EDIT_MODEL` | – | Model used when `edit_with_instructions` is called without one (default `qwen-image-edit-2511`) |
@@ -270,7 +277,7 @@ The result has `ran: "local"`, `outputs[].path` (the file in the gallery),
 
 ### Cloud generation
 
-1. Resolves the payment rail (explicit `rail` arg > API key > wallet).
+1. Resolves the payment rail (explicit `rail` arg > Imference key > wallet).
 2. Submits the request — credits: `POST /generate`; x402: prices the request
    from the catalog, then `POST /ondemand/generate` with the signed payment.
 3. Polls the status endpoint with exponential backoff for up to `wait_seconds`

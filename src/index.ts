@@ -15,7 +15,7 @@
  *                                  (default: <UserConfigDir>/imference-desktop-go/local-api.json)
  *   IMFERENCE_TOOLS_CATALOG        'bundled' = skip fetching the live editing-tool catalog
  *
- * At least one of API key / wallet is needed to generate; catalog tools and
+ * At least one of an Imference key / a wallet is needed to generate; catalog tools and
  * status polling work without any credential.
  */
 
@@ -89,7 +89,7 @@ const server = new McpServer({
 });
 
 // ---------------------------------------------------------------------------
-// The credits key: IMFERENCE_API_KEY, else the Imference Desktop account's
+// The credits key: IMFERENCE_API_KEY, else Imference Desktop's Imference
 // key — asked from Desktop before each tool call (cached a few seconds), so a
 // key added in Desktop, or the permission turned off, applies at once.
 // ---------------------------------------------------------------------------
@@ -123,10 +123,10 @@ async function lookupDesktopKey(): Promise<void> {
   client.setApiKey(
     c.api_key,
     c.code === "not_allowed"
-      ? "Or let this server use the Imference Desktop account: in Imference Desktop, turn on Settings › AI agents › " +
+      ? "Or let this server use Imference Desktop's Imference key: in Imference Desktop, turn on Settings › AI agents › " +
           "Let AI agents spend my credits (the user must do it)."
       : c.code === "no_api_key"
-        ? "Imference Desktop has no Imference account yet: the user can buy credits in it (Settings › Credits & account)."
+        ? "Imference Desktop has no Imference key yet: the user can buy credits in it (Settings › Credits & key)."
         : undefined,
   );
   keySource = c.api_key ? "desktop" : "none";
@@ -169,7 +169,7 @@ async function imagePreview(media: MediaRow): Promise<ContentBlock[]> {
 }
 
 // ---------------------------------------------------------------------------
-// Catalog tools (no API key required)
+// Catalog tools (no Imference key required)
 // ---------------------------------------------------------------------------
 
 registerTool(
@@ -429,8 +429,8 @@ registerTool(
       "get_model to learn how to prompt it and which parameters it accepts. Size and " +
       "aspect ratio are chosen with format_code (a predefined format from list_formats), never " +
       "with raw dimensions. Payment: " +
-      "either the credits rail (API key balance) or the x402 rail (pay-per-generation in USDC " +
-      "on Base, signed with the configured wallet); defaults to credits when an API key is set, " +
+      "either the credits rail (Imference key balance) or the x402 rail (pay-per-generation in USDC " +
+      "on Base, signed with the configured wallet); defaults to credits when an Imference key is set, " +
       "else x402 when a wallet is set. Returns the media URL when done; if the generation is " +
       "still running after wait_seconds, returns the request_id so you can poll with check_status. " +
       "run_on 'auto' (default) generates locally when Imference Desktop is running and has the model " +
@@ -450,8 +450,8 @@ registerTool(
         .enum(["credits", "x402"])
         .optional()
         .describe(
-          "Payment rail: 'credits' (API key balance) or 'x402' (per-request USDC payment " +
-            "on Base). Default: credits if an API key is configured, else x402.",
+          "Payment rail: 'credits' (Imference key balance) or 'x402' (per-request USDC payment " +
+            "on Base). Default: credits if an Imference key is configured, else x402.",
         ),
       model: DEFAULT_MODEL
         ? z
@@ -756,7 +756,7 @@ registerTool(
   {
     title: "Get credit balance",
     description:
-      "Get the remaining credit balance of the configured Imference API key (1 credit = $0.001). " +
+      "Get the remaining credit balance of the configured Imference key (1 credit = $0.001). " +
       "Compare with a model's cost_credits from list_models before generating.",
     inputSchema: {},
   },
@@ -775,9 +775,10 @@ registerTool(
   {
     title: "Buy credits with the wallet (x402)",
     description:
-      "Top up an Imference API key's credit balance with a single USDC payment on Base " +
-      "(price = credits × $0.001), signed by the configured wallet. Omit api_key to have the " +
-      "server mint a brand-new API key and return it — save that key, it carries the credits. " +
+      "Top up an Imference key's credit balance with a single USDC payment on Base " +
+      "(price = credits × $0.001), signed by the configured wallet. Omit api_key to top up the " +
+      "key in use (IMFERENCE_API_KEY or Imference Desktop's); with none, the server mints a " +
+      "brand-new Imference key and returns it — save that key, it carries the credits. " +
       `Bounds: ${MIN_X402_CREDITS_TOPUP} to ${MAX_X402_CREDITS_TOPUP} credits per call ` +
       "($0.10 to $1,000). Cheaper than per-generation x402 payments when generating a lot " +
       "(one network fee instead of one per generation).",
@@ -792,14 +793,16 @@ registerTool(
         .string()
         .optional()
         .describe(
-          "API key to credit. Defaults to the configured IMFERENCE_API_KEY; " +
-            "pass an empty string to force minting a new key.",
+          "Imference key to credit. Defaults to the key in use (IMFERENCE_API_KEY, or Imference " +
+            "Desktop's); pass an empty string to force minting a new key.",
         ),
     },
   },
   async ({ credits, api_key }) => {
     try {
-      const targetKey = api_key ?? process.env.IMFERENCE_API_KEY;
+      // The key in use, whether it came from the env or from Imference Desktop:
+      // topping up Desktop's key must not mint a new one.
+      const targetKey = api_key ?? client.apiKey;
       const res = await client.addCreditsX402(credits, targetKey || undefined);
       return ok({
         api_key: res.api_key,
@@ -809,7 +812,7 @@ registerTool(
         note:
           targetKey && targetKey === res.api_key
             ? undefined
-            : "A new API key was created — store it and set it as IMFERENCE_API_KEY to use the credits rail.",
+            : "A new Imference key was created — store it and set it as IMFERENCE_API_KEY to use the credits rail.",
       });
     } catch (e) {
       return fail(e);
@@ -822,7 +825,7 @@ registerTool(
   {
     title: "Show configured payment rails",
     description:
-      "Show which payment rails this server can use: credits (IMFERENCE_API_KEY) and/or x402 " +
+      "Show which payment rails this server can use: credits (an Imference key, IMFERENCE_API_KEY) and/or x402 " +
       "(wallet paying USDC on Base), plus the spending caps and what has been spent so far. " +
       "Returns the wallet's public address when configured — fund it with USDC on Base mainnet " +
       "to enable x402 payments. Never exposes key material.",
@@ -834,7 +837,7 @@ registerTool(
       base_url: process.env.IMFERENCE_BASE_URL ?? "https://imference.com",
       credits_rail: client.hasApiKey
         ? keySource === "desktop"
-          ? "configured (the Imference Desktop account — allowed in Desktop's Settings › AI agents)"
+          ? "configured (Imference Desktop's Imference key — allowed in Desktop's Settings › AI agents)"
           : "configured (IMFERENCE_API_KEY set)"
         : "not configured" + (client.missingKeyHint ? ` — ${client.missingKeyHint}` : ""),
       x402_rail: client.hasWallet
@@ -879,7 +882,7 @@ registerTool(
   {
     title: "List generated media",
     description:
-      "List all images and videos previously generated with the configured API key, newest first.",
+      "List all images and videos previously generated with the configured Imference key, newest first.",
     inputSchema: {
       limit: z.number().int().positive().max(200).optional().describe("Max rows to return (default 25)"),
     },
@@ -900,7 +903,7 @@ registerTool(
   {
     title: "List call history",
     description:
-      "List past calls (generations and editing tools), newest first, for the API key (credits " +
+      "List past calls (generations and editing tools), newest first, for the Imference key (credits " +
       "rail) or the configured wallet (x402 rail, signed in automatically, no payment). Each call " +
       "has its status, rail, kind, credits charged and its outputs. Prompts and settings are never " +
       "stored, so they are not listed. Output URLs are given for 24 h: pass one to download_media " +
@@ -909,7 +912,7 @@ registerTool(
       rail: z
         .enum(["credits", "x402"])
         .optional()
-        .describe("Whose calls: the API key's (credits) or the wallet's (x402). Default: credits when an API key is set, else x402"),
+        .describe("Whose calls: the Imference key's (credits) or the wallet's (x402). Default: credits when an Imference key is set, else x402"),
       limit: z.number().int().positive().max(200).optional().describe("Max calls (default 25)"),
       cursor: z.string().optional().describe("next_cursor of the previous page"),
       since: z.string().optional().describe("Only calls at or after this RFC 3339 time"),
