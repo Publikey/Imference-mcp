@@ -267,7 +267,7 @@ test("resolveFormat picks the named format, else the model's default", () => {
   assert.equal(resolveFormat([], "square"), undefined);
 });
 
-test("top-up bounds convert to the right atomic amounts", () => {
+test("credits convert to the right atomic USDC amounts", () => {
   assert.equal(creditsToAtomicUsdc(100), 100_000n); // $0.10
   assert.equal(creditsToAtomicUsdc(1_000_000), 1_000_000_000n); // $1,000
   assert.equal(usdToAtomic(10), 10_000_000n);

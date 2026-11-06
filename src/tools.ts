@@ -70,7 +70,7 @@ export function resolveRail(client: ImferenceClient, requested?: Rail): Rail {
       throw new ImferenceError(
         "rail 'credits' requested but IMFERENCE_API_KEY is not set. " +
           (client.hasWallet
-            ? "Either set an Imference key (IMFERENCE_API_KEY), use rail 'x402', or buy a key with buy_credits_with_wallet."
+            ? "Either set an Imference key (IMFERENCE_API_KEY; buy credits by card or crypto at https://imference.com/payments) or use rail 'x402'."
             : "Set IMFERENCE_API_KEY to an Imference key. Get credits at https://imference.com/payments (lost your key? https://imference.com/key).") +
           (client.missingKeyHint ? ` ${client.missingKeyHint}` : ""),
       );

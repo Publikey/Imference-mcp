@@ -100,14 +100,6 @@ test("pays the v2 challenge with PAYMENT-SIGNATURE, never X-PAYMENT (C3)", async
   assert.deepEqual(out.payment, { success: true, transaction: "0xabc", network: "eip155:8453", payer: PAYER });
 });
 
-test("a credits top-up above the SDK's $1 default cap is paid", async () => {
-  behaviour.accepts = [offer({ amount: "500000000" })]; // $500
-  behaviour.body = { api_key: "k", credits_added: 500000 };
-  const out = await makeClient().addCreditsX402(500000);
-  assert.equal(out.credits_added, 500000);
-  assert.equal(calls[1].payment, "v2");
-});
-
 test("an offer above the authorized price is refused, nothing signed (C2)", async () => {
   behaviour.accepts = [offer({ amount: "200000" })]; // $0.20 for a $0.05 run (+ $0.01 headroom)
   await assert.rejects(

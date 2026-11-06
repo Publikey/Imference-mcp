@@ -35,8 +35,6 @@ import {
   isVideoModel,
   modelKind,
   MAX_LORAS,
-  MAX_X402_CREDITS_TOPUP,
-  MIN_X402_CREDITS_TOPUP,
   resolveFormat,
   type GeneratePayload,
   type MediaRow,
@@ -771,56 +769,6 @@ registerTool(
 );
 
 registerTool(
-  "buy_credits_with_wallet",
-  {
-    title: "Buy credits with the wallet (x402)",
-    description:
-      "Top up an Imference key's credit balance with a single USDC payment on Base " +
-      "(price = credits × $0.001), signed by the configured wallet. Omit api_key to top up the " +
-      "key in use (IMFERENCE_API_KEY or Imference Desktop's); with none, the server mints a " +
-      "brand-new Imference key and returns it — save that key, it carries the credits. " +
-      `Bounds: ${MIN_X402_CREDITS_TOPUP} to ${MAX_X402_CREDITS_TOPUP} credits per call ` +
-      "($0.10 to $1,000). Cheaper than per-generation x402 payments when generating a lot " +
-      "(one network fee instead of one per generation).",
-    inputSchema: {
-      credits: z
-        .number()
-        .int()
-        .min(MIN_X402_CREDITS_TOPUP)
-        .max(MAX_X402_CREDITS_TOPUP)
-        .describe("Credits to buy (1 credit = $0.001 USDC)"),
-      api_key: z
-        .string()
-        .optional()
-        .describe(
-          "Imference key to credit. Defaults to the key in use (IMFERENCE_API_KEY, or Imference " +
-            "Desktop's); pass an empty string to force minting a new key.",
-        ),
-    },
-  },
-  async ({ credits, api_key }) => {
-    try {
-      // The key in use, whether it came from the env or from Imference Desktop:
-      // topping up Desktop's key must not mint a new one.
-      const targetKey = api_key ?? client.apiKey;
-      const res = await client.addCreditsX402(credits, targetKey || undefined);
-      return ok({
-        api_key: res.api_key,
-        credits_added: res.credits_added,
-        cost_usd: credits * 0.001,
-        payment: res.payment,
-        note:
-          targetKey && targetKey === res.api_key
-            ? undefined
-            : "A new Imference key was created — store it and set it as IMFERENCE_API_KEY to use the credits rail.",
-      });
-    } catch (e) {
-      return fail(e);
-    }
-  },
-);
-
-registerTool(
   "payment_config",
   {
     title: "Show configured payment rails",
@@ -863,7 +811,7 @@ registerTool(
     title: "Get wallet USDC balance",
     description:
       "Read the configured wallet's USDC balance on Base mainnet (read-only RPC call). Use it " +
-      "to check the wallet can cover a generation or top-up before paying. x402 payments are " +
+      "to check the wallet can cover a generation before paying. x402 payments are " +
       "gasless for the payer — only USDC is needed, no ETH.",
     inputSchema: {},
   },
@@ -965,7 +913,7 @@ function registerEditingTools(catalog: Catalog): void {
 
   const taken = new Set([
     "list_models", "get_model", "list_formats", "list_loras", "generate", "check_status",
-    "download_media", "get_balance", "buy_credits_with_wallet", "payment_config",
+    "download_media", "get_balance", "payment_config",
     "wallet_balance", "list_media", "list_tools",
   ]);
   for (const tool of catalog.tools) {
